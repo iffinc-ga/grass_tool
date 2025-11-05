@@ -6,6 +6,7 @@
   <title>Grass Invoice PDF Parser — Steel/Other Sublines</title>
   <!-- Libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
@@ -48,7 +49,6 @@
     .btn.del{background:#fee2e2}
     .btn.add{background:#dbeafe}
 
-    /* Column widths */
     .col-pos{width:64px}
     .col-part{width:260px}
     .col-qty{width:100px}
@@ -74,7 +74,7 @@
     <div class="upload" id="upload">
       <div class="drop" id="drop">
         <h3>📤 Click or Drag & Drop a PDF</h3>
-        <p style="margin-top:6px;color:#6b7280">Optimized for Grass format (e.g., “Invoice 4543720 …”, “Net weight in kg in steel/other”, DE/CZ COO).</p>
+        <p style="margin-top:6px;color:#6b7280">Optimized for Grass format (e.g., “Invoice …”, “Net weight in kg in steel/other”, DE/CZ COO).</p>
         <input id="fileInput" type="file" accept="application/pdf,.pdf" />
       </div>
     </div>
@@ -92,7 +92,6 @@
       <input id="dateInp" placeholder="Invoice Date MM/DD/YYYY" />
       <input id="totalInp" type="number" step="0.01" placeholder="Invoice Total (USD)" />
       <button id="exportBtn">Export to Excel</button>
-      <button id="exportCiBtn" class="ghost">Export CI Template</button>
       <button id="newBtn" class="ghost">New Upload</button>
     </div>
 
@@ -125,11 +124,8 @@
   </div>
 
 <script>
-  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-
   const $ = sel => document.querySelector(sel);
   const $$ = sel => Array.from(document.querySelectorAll(sel));
-
   const UI = {
     upload: $('#upload'),
     drop: $('#drop'),
@@ -152,17 +148,14 @@
     tbody: $('#tbody'),
     rows: $('#rows'),
     exportBtn: $('#exportBtn'),
-    exportCiBtn: $('#exportCiBtn'),
     newBtn: $('#newBtn'),
   };
 
-  // Keep everything for multiple invoices in a single upload
-  let ALL = []; // [{ invoice_number, invoice_date, supplier, invoice_total, position, part_number, quantity, unit, unit_price, line_total, net_weight, country_of_origin }]
-  let ORDER = []; // invoice order
+  let ALL = []; // parsed rows
+  let ORDER = []; // invoice numbers
   let CURRENT = '';
   let filename = '';
 
-  // === Helpers ===
   function showAlert(msg, ok=true){
     UI.alert.className = 'alert ' + (ok?'ok':'err');
     UI.alert.textContent = msg; UI.alert.style.display='block';
@@ -173,46 +166,30 @@
     if(s==null) return NaN;
     const t = String(s).trim();
     if(!t) return NaN;
-    // Handle European format like 1.240,03 and US like 1,240.03
     if(/\d+[.,]\d{3}[.,]\d{2}$/.test(t)){
-      // assume last separator is decimal
       const last = t.lastIndexOf('.')>t.lastIndexOf(',')?'.':',';
       const intPart = t.slice(0, t.lastIndexOf(last)).replace(/[.,\s]/g,'');
       const decPart = t.slice(t.lastIndexOf(last)+1);
       return parseFloat(intPart + '.' + decPart);
     }
-    // If comma decimals e.g. 1240,03
     if(/,\d{2}$/.test(t) && !/\.\d{2}$/.test(t)){
       return parseFloat(t.replace(/\./g,'').replace(',','.'));
     }
-    // Plain
     return parseFloat(t.replace(/,/g,''));
   }
-
   function fmt2(n){ const x = Number(n); return isFinite(x)? x.toFixed(2):''; }
-  function toUS(mmddyyyy){
-    // from dd.mm.yyyy
-    const m = String(mmddyyyy||'').match(/(\d{2})\.(\d{2})\.(\d{4})/);
-    if(m){ return `${m[2]}/${m[1]}/${m[3]}`; }
-    return mmddyyyy||'';
+  function toUS(ddmmyyyy){
+    const m = String(ddmmyyyy||'').match(/(\d{2})\.(\d{2})\.(\d{4})/);
+    return m ? `${m[2]}/${m[1]}/${m[3]}` : (ddmmyyyy||'');
   }
+  function sumLines(list){ return list.reduce((a,r)=> a + (parseNum(r.line_total)||0), 0); }
+  function nextLetterPos(base){ const num = String(base||'').replace(/[^0-9].*$/,'') || '0'; return num + (Math.random()<0.5?'S':'A'); }
 
-  function sumLines(list){
-    return list.reduce((a,r)=> a + (parseNum(r.line_total)||0), 0);
-  }
-
-  function nextLetterPos(base){
-    const num = String(base||'').replace(/[^0-9].*$/,'') || '0';
-    return num + (Math.random()<0.5?'S':'A');
-  }
-
-  // === Upload Handlers ===
   UI.drop.addEventListener('click', ()=> UI.file.click());
   UI.file.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f); });
   UI.drop.addEventListener('dragover', e=>{ e.preventDefault(); UI.drop.style.background='#f1f5ff'; });
   UI.drop.addEventListener('dragleave', ()=> UI.drop.style.background='');
   UI.drop.addEventListener('drop', e=>{ e.preventDefault(); UI.drop.style.background=''; const f=e.dataTransfer.files?.[0]; if(f) handleFile(f); });
-
   UI.newBtn.addEventListener('click', ()=> location.reload());
 
   async function handleFile(file){
@@ -230,7 +207,7 @@
           text += (tc.items||[]).map(it=> it?.str || '').join(' ') + "\n";
         }catch(e){ console.warn('page read failed', i, e); }
       }
-      if(!text.trim()){ showAlert('PDF has no extractable text (maybe scanned). Try OCR.', false); UI.upload.style.display='block'; return; }
+      if(!text.trim()){ showAlert('PDF has no selectable text (maybe scanned). Try OCR.', false); UI.upload.style.display='block'; return; }
       parseGrass(text);
       if(ALL.length){
         buildUI();
@@ -243,59 +220,48 @@
     finally{ UI.loading.style.display='none'; }
   }
 
-  // === Parser for Grass format ===
+  // --------- Parser ----------
   function parseGrass(text){
     ALL.length = 0; ORDER.length = 0;
     const big = String(text||'');
 
     // Invoice number
     const invMatch = [...big.matchAll(/Invoice\s+(\d{5,})/gi)];
-    const invNum = invMatch.length? invMatch[0][1] : 'UNKNOWN';
+    const invNum = invMatch.length ? invMatch[0][1] : 'UNKNOWN';
     if(!ORDER.includes(invNum)) ORDER.push(invNum);
 
     // Date
     let invDate = '';
     const dm = big.match(/Date:\s*(\d{2}\.\d{2}\.\d{4})/); if(dm) invDate = toUS(dm[1]);
 
-    // Supplier (from header block: Grass GmbH Österreich)
+    // Supplier (compact)
     let supplier = 'GRASS GmbH';
-    const supm = big.match(/Grass\s+GmbH[^\n]*|GRASS\s+GmbH[^\n]*/i);
-    if(supm) supplier = supm[0].trim();
+    const supExact = big.match(/\bGRASS\s+GmbH\s+(Österreich|Osterreich)\b/i);
+    if(supExact){ supplier = 'GRASS GmbH Österreich'; }
+    else if(/\bGRASS\s+GmbH\b/i.test(big)) { supplier = 'GRASS GmbH'; }
 
-    // Invoice total (Total Amount 206,231.03 USD)
+    // Invoice total
     let invTotal = '';
     const tm = big.match(/Total\s+Amount\s+([\d.,]+)\s+USD/i);
     if(tm) invTotal = String(parseNum(tm[1])||'');
 
-    // Split into item sections by article number lines. Example: F058139894217 1000 PCS 1,240.03 / 1000 1.240,03 USD
+    // Line header
     const itemRegex = /\b(F\d{9,})\s+(\d+[\d.,]*)\s+(PCS|PC|SET|PAIRS?)\s+([\d.,]+)\s*\/\s*(\d+)\s+([\d.,]+)\s+USD/gi;
-
     const items = [];
     let m;
     while((m = itemRegex.exec(big)) !== null){
-      items.push({
-        idx: m.index,
-        part: m[1],
-        qty: parseNum(m[2]),
-        unit: m[3].toUpperCase(),
-        unitPricePer: parseNum(m[4]), // price per divisor
-        perDivisor: parseNum(m[5]),
-        lineTotal: parseNum(m[6]),
-      });
+      items.push({ idx: m.index, part: m[1], qty: parseNum(m[2]), unit: m[3].toUpperCase(), unitPricePer: parseNum(m[4]), perDivisor: parseNum(m[5]), lineTotal: parseNum(m[6]) });
     }
 
-    // If none found, bail
     if(items.length===0){
-      // Create one editable row to avoid blank UI
       ALL.push({invoice_number:invNum, invoice_date:invDate, supplier, invoice_total:invTotal, position:'', part_number:'', quantity:'', unit:'', unit_price:'', line_total:'', net_weight:'', country_of_origin:''});
       return;
     }
 
-    // Harvest per-item meta from surrounding text windows
     items.forEach((it, i)=>{
       const start = it.idx;
       const end = (i < items.length-1 ? items[i+1].idx : start + 2000);
-      const slab = big.slice(start, end);
+      let slab = big.slice(start, end);
 
       // COO
       let coo = '';
@@ -305,33 +271,37 @@
       let netkg = '';
       const wM = slab.match(/Net\s+weight\s+in\s+kg:\s*([\d.,]+)/i); if(wM) netkg = fmt2(parseNum(wM[1]));
 
-      // Steel & Other allocations lines exist after many items
-      // Patterns like: "Net weight in kg in steel: 103" + "Steel value: 1240.03" [+ "Other value: 355.59"]
+      // Scope steel/other region right after “Net weight in kg:”
       let steelKG=NaN, steelVal=NaN, otherKG=NaN, otherVal=NaN;
-      const sKGm = slab.match(/Net\s+weight\s+in\s+kg\s+in\s+steel:\s*([\d.,]+)/i);
-      const sVm  = slab.match(/Steel\s+value:\s*([\d.,]+)/i);
-      const oKGm = slab.match(/Net\s+weight\s+in\s+kg\s+in\s+other:\s*([\d.,]+)/i);
-      const oVm  = slab.match(/Other\s+value:\s*([\d.,]+)/i);
+      const netIdx = slab.search(/Net\s+weight\s+in\s+kg:/i);
+      const regionStart = netIdx >= 0 ? netIdx : 0;
+      const regionEnd = Math.min(regionStart + 600, slab.length); // widen if needed
+      const region = slab.slice(regionStart, regionEnd);
+
+      const sKGm = region.match(/Net\s+weight\s+in\s+kg\s+in\s+steel:\s*([\d.,]+)/i);
+      const sVm  = region.match(/Steel\s+value:\s*([\d.,]+)/i);
+      const oKGm = region.match(/Net\s+weight\s+in\s+kg\s+in\s+other:\s*([\d.,]+)/i);
+      const oVm  = region.match(/Other\s+value:\s*([\d.,]+)/i);
       if(sKGm) steelKG = parseNum(sKGm[1]);
       if(sVm)  steelVal = parseNum(sVm[1]);
       if(oKGm) otherKG  = parseNum(oKGm[1]);
       if(oVm)  otherVal = parseNum(oVm[1]);
 
-      // Compute unit price in USD per selling unit (unitPricePer was per "perDivisor")
+      // Compute USD per selling unit
       const unitPrice = (isFinite(it.unitPricePer) && isFinite(it.perDivisor) && it.perDivisor>0)
         ? (it.unitPricePer / it.perDivisor)
         : '';
 
-      // Position = sequential 1..N
+      // Position
       const pos = (i+1).toString();
 
-      // Adjust main line total by subtracting steel/other values if present
+      // Subtract steel/other from main line
       let baseTotal = it.lineTotal;
       const subSteel = isFinite(steelVal)? steelVal : 0;
       const subOther = isFinite(otherVal)? otherVal : 0;
       if(isFinite(baseTotal)) baseTotal = Math.max(0, baseTotal - subSteel - subOther);
 
-      // Push base item
+      // Base row
       ALL.push({
         invoice_number: invNum,
         invoice_date: invDate,
@@ -347,7 +317,7 @@
         country_of_origin: coo
       });
 
-      // Steel subline S
+      // Steel subline (S)
       if(isFinite(subSteel) && subSteel>0){
         ALL.push({
           invoice_number: invNum,
@@ -364,8 +334,7 @@
           country_of_origin: coo
         });
       }
-
-      // Other subline A
+      // Other subline (A)
       if(isFinite(subOther) && subOther>0){
         ALL.push({
           invoice_number: invNum,
@@ -385,7 +354,7 @@
     });
   }
 
-  // === UI Binding ===
+  // --------- UI ----------
   function buildUI(){
     UI.bar.style.display='flex';
 
@@ -406,10 +375,15 @@
 
     UI.invSel.onchange = ()=>{ CURRENT = UI.invSel.value; if(CURRENT){ renderInvoice(CURRENT); } };
     UI.exportBtn.onclick = exportExcel;
-    UI.exportCiBtn.onclick = exportToCITemplate;
 
-    // Auto load first invoice
+    // Auto-load first invoice
     CURRENT = ORDER[0]; UI.invSel.value = CURRENT; renderInvoice(CURRENT);
+
+    // Header input tab order
+    UI.invSel.tabIndex = 1;
+    UI.supplierInp.tabIndex = 2;
+    UI.dateInp.tabIndex = 3;
+    UI.totalInp.tabIndex = 4;
   }
 
   function renderInvoice(id){
@@ -443,9 +417,12 @@
     UI.supplierInp.onchange = e=> updateHdr('supplier', e.target.value);
     UI.dateInp.onchange = e=> updateHdr('invoice_date', e.target.value);
     UI.totalInp.onchange = e=> { updateHdr('invoice_total', e.target.value); recomputeStats(); };
+
+    // Rebuild tabindex for body cells after render
+    rebuildTabOrder();
   }
 
-  function renderRow(row, idx, rows){
+  function renderRow(row, idx){
     const tr = document.createElement('tr');
 
     function tdInput(val, key, readOnly=false){
@@ -453,7 +430,10 @@
       const inp = document.createElement('input');
       inp.value = val==null? '': String(val);
       if(readOnly){ inp.className='readonly'; inp.readOnly=true; }
+      inp.dataset.row = String(idx);
+      inp.dataset.key = key;
       inp.onchange = ()=> updateCell(idx, key, inp.value);
+      inp.onkeydown = (ev)=> handleCellKeydown(ev);
       td.appendChild(inp); return td;
     }
 
@@ -528,7 +508,26 @@
     UI.stDiff.textContent = '$'+diff.toFixed(2);
   }
 
-  // === Export ===
+  // ---- Keyboard nav ----
+  function rebuildTabOrder(){
+    let ti = 10; // after header controls
+    $$('#rows input').forEach(inp=>{ inp.tabIndex = ti++; });
+  }
+  function focusNext(current, dir){
+    const inputs = [UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp, ...$$('#rows input')].filter(Boolean);
+    const idx = inputs.indexOf(current);
+    const nextIdx = Math.max(0, Math.min(inputs.length-1, idx + (dir||1)));
+    const target = inputs[nextIdx];
+    if(target){ target.focus(); target.select?.(); }
+  }
+  function handleCellKeydown(ev){
+    if(ev.key === 'Enter'){
+      ev.preventDefault();
+      focusNext(ev.target, ev.shiftKey ? -1 : 1);
+    }
+  }
+
+  // ---- Export ----
   function exportExcel(){
     const wb = XLSX.utils.book_new();
     const byInv = {};
@@ -560,69 +559,6 @@
     const a = document.createElement('a');
     a.href = url; a.download = (filename? filename + '_' : '') + 'grass_parsed.xlsx';
     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-  }
-
-  // Export in Descartes CI template mapping (lean mapping; extend as needed)
-  function exportToCITemplate(){
-    if(!ALL.length){ showAlert('No data to export', false); return; }
-
-    const headers = [
-      'InvoiceNumber','InvoiceDate','InvoiceTotal','SupplierMID','SupplierName',
-      'BuyerPartNumber','SupplierPartNumber','Quantity','UnitOfMeasure','Description',
-      'UnitPrice','ItemTotal','CurrencyCode','ExchangeRate','CountryOfOrigin',
-      'CountryOfExport','DateOfExport','PortOfLading','RelatedParty','PO_Number',
-      'PO_Date','GrossWeight','GrossWeightUnit','NetWeight','TariffNumber',
-      'TariffDescription','Quantity1','UnitOfMeasure1','Quantity2','UnitOfMeasure2',
-      'Quantity3','UnitOfMeasure3','PrimarySPI','SecondarySPI','DeliverTo',
-      'SoldTo','SecondaryTariffNumber'
-    ];
-
-    const wb = XLSX.utils.book_new();
-    const byInv = {};
-    ALL.forEach(r=>{ if(!byInv[r.invoice_number]) byInv[r.invoice_number]=[]; byInv[r.invoice_number].push(r); });
-
-    Object.keys(byInv).forEach(id=>{
-      const rows = byInv[id].slice().sort((a,b)=>{
-        const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
-        const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
-        const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
-        if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
-      });
-
-      const aoa = [headers.slice()];
-      rows.forEach(item=>{
-        const row = new Array(headers.length).fill('');
-        row[0]  = item.invoice_number || '';
-        row[1]  = item.invoice_date || '';
-        row[2]  = parseNum(item.invoice_total)||'';
-        row[3]  = ''; // SupplierMID (blank)
-        row[4]  = item.supplier || '';
-        row[5]  = ''; // BuyerPartNumber
-        row[6]  = item.part_number || ''; // SupplierPartNumber
-        row[7]  = parseNum(item.quantity)||'';
-        row[8]  = item.unit || '';
-        row[9]  = ''; // Description
-        row[10] = parseNum(item.unit_price)||'';
-        row[11] = parseNum(item.line_total)||'';
-        row[12] = 'USD';
-        row[13] = ''; // ExchangeRate
-        row[14] = item.country_of_origin || '';
-        // optional fields left blank unless specified
-        row[23] = parseNum(item.net_weight)||''; // NetWeight
-        aoa.push(row);
-      });
-
-      const ws = XLSX.utils.aoa_to_sheet(aoa);
-      XLSX.utils.book_append_sheet(wb, ws, ('INV_'+id).slice(0,31));
-    });
-
-    const out = XLSX.write(wb, {type:'array', bookType:'xlsx'});
-    const blob = new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = (filename? filename + '_' : '') + 'CI_template.xlsx';
-    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-    showAlert('Exported CI template workbook', true);
   }
 </script>
 </body>
