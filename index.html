@@ -26,7 +26,7 @@
     @keyframes spin{to{transform:rotate(360deg)}}
 
     .bar{display:flex;gap:12px;align-items:center;padding:16px 20px;background:#f8fafc;border-top:1px solid #eef2ff;border-bottom:1px solid #eef2ff}
-    .bar select,.bar input{padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;min-width:320px}
+    .bar select,.bar input{padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;min-width:280px}
     .bar button{padding:10px 14px;border:0;border-radius:10px;background:#111;color:#fff;font-weight:700;cursor:pointer}
     .bar .ghost{background:#eef2ff;color:#111}
 
@@ -49,6 +49,7 @@
     .btn.del{background:#fee2e2}
     .btn.add{background:#dbeafe}
 
+    /* Column widths */
     .col-pos{width:64px}
     .col-part{width:260px}
     .col-qty{width:100px}
@@ -68,7 +69,7 @@
   <div class="wrap">
     <div class="header">
       <h1>Grass Invoice PDF Parser (Steel/Other sublines)</h1>
-      <p>Drop in a Grass consolidated invoice PDF. The tool extracts lines, subtracts Steel/Other allocations from the main line, and inserts S/A sublines below the base line.</p>
+      <p>Drop in a Grass consolidated invoice PDF. The tool extracts lines, subtracts Steel/Other allocations from the main line, and inserts S/A sublines directly below the base line.</p>
     </div>
 
     <div class="upload" id="upload">
@@ -124,8 +125,11 @@
   </div>
 
 <script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
   const $ = sel => document.querySelector(sel);
   const $$ = sel => Array.from(document.querySelectorAll(sel));
+
   const UI = {
     upload: $('#upload'),
     drop: $('#drop'),
@@ -151,11 +155,13 @@
     newBtn: $('#newBtn'),
   };
 
+  // Storage
   let ALL = [];
   let ORDER = [];
   let CURRENT = '';
   let filename = '';
 
+  // Helpers
   function showAlert(msg, ok=true){
     UI.alert.className = 'alert ' + (ok?'ok':'err');
     UI.alert.textContent = msg; UI.alert.style.display='block';
@@ -166,6 +172,7 @@
     if(s==null) return NaN;
     const t = String(s).trim();
     if(!t) return NaN;
+    // European 1.240,03 vs US 1,240.03
     if(/\d+[.,]\d{3}[.,]\d{2}$/.test(t)){
       const last = t.lastIndexOf('.')>t.lastIndexOf(',')?'.':',';
       const intPart = t.slice(0, t.lastIndexOf(last)).replace(/[.,\s]/g,'');
@@ -185,6 +192,7 @@
   function sumLines(list){ return list.reduce((a,r)=> a + (parseNum(r.line_total)||0), 0); }
   function nextLetterPos(base){ const num = String(base||'').replace(/[^0-9].*$/,'') || '0'; return num + (Math.random()<0.5?'S':'A'); }
 
+  // Upload
   UI.drop.addEventListener('click', ()=> UI.file.click());
   UI.file.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f); });
   UI.drop.addEventListener('dragover', e=>{ e.preventDefault(); UI.drop.style.background='#f1f5ff'; });
@@ -220,7 +228,7 @@
     finally{ UI.loading.style.display='none'; }
   }
 
-  // --------- Parser ----------
+  // Parser
   function parseGrass(text){
     ALL.length = 0; ORDER.length = 0;
     const big = String(text||'');
@@ -234,7 +242,7 @@
     let invDate = '';
     const dm = big.match(/Date:\s*(\d{2}\.\d{2}\.\d{4})/); if(dm) invDate = toUS(dm[1]);
 
-    // Supplier (compact)
+    // Supplier (compact legal name only)
     let supplier = 'GRASS GmbH';
     const supExact = big.match(/\bGRASS\s+GmbH\s+(Österreich|Osterreich)\b/i);
     if(supExact){ supplier = 'GRASS GmbH Österreich'; }
@@ -245,7 +253,7 @@
     const tm = big.match(/Total\s+Amount\s+([\d.,]+)\s+USD/i);
     if(tm) invTotal = String(parseNum(tm[1])||'');
 
-    // Line header
+    // Item header pattern
     const itemRegex = /\b(F\d{9,})\s+(\d+[\d.,]*)\s+(PCS|PC|SET|PAIRS?)\s+([\d.,]+)\s*\/\s*(\d+)\s+([\d.,]+)\s+USD/gi;
     const items = [];
     let m;
@@ -260,35 +268,47 @@
 
     items.forEach((it, i)=>{
       const start = it.idx;
-      const end = (i < items.length-1 ? items[i+1].idx : start + 2000);
+      const end = (i < items.length-1 ? items[i+1].idx : start + 2500);
       const slab = big.slice(start, end);
 
       // COO
       let coo = '';
       const cooM = slab.match(/Country\s+of\s+Origin:\s*([A-Z]{2})/i); if(cooM) coo = cooM[1].toUpperCase();
 
-      // Net weight
+      // Net weight (main)
       let netkg = '';
       const wM = slab.match(/Net\s+weight\s+in\s+kg:\s*([\d.,]+)/i); if(wM) netkg = fmt2(parseNum(wM[1]));
 
-      // ---- Steel/Other scoping: start at the item's "Net weight in kg:" line and search forward in a short window ----
+      // === Steel/Other scoped search ===
+      // Anchor at this item's "Net weight in kg:" and search forward within a short window to avoid bleed
       let steelKG=NaN, steelVal=NaN, otherKG=NaN, otherVal=NaN;
       const netIdx = slab.search(/Net\s+weight\s+in\s+kg:/i);
-      const regionStart = netIdx >= 0 ? netIdx : 0;
-      const regionEnd = Math.min(regionStart + 1200, slab.length); // widened to capture late-appearing values like 8,534.09
-      const region = slab.slice(regionStart, regionEnd);
+      let regionStart = netIdx >= 0 ? netIdx : 0;
+      let regionEnd = Math.min(regionStart + 1400, slab.length);
+      let region = slab.slice(regionStart, regionEnd);
 
-      const sKGm = region.match(/Net\s+weight\s+in\s+kg\s+in\s+steel:\s*([\d.,]+)/i);
+      // Prefer the first occurrence nearest to the anchor
+      let sKGm = region.match(/Net\s+weight\s+in\s+kg\s+in\s+steel:\s*([\d.,]+)/i);
       if(sKGm) steelKG = parseNum(sKGm[1]);
 
-      const sVall = [...region.matchAll(/Steel\s+value:\s*([\d.,]+)/gi)];
+      let sVall = [...region.matchAll(/Steel\s+value:\s*([\d.,]+)/gi)];
       if(sVall.length) steelVal = parseNum(sVall[0][1]);
 
-      const oKGm = region.match(/Net\s+weight\s+in\s+kg\s+in\s+other:\s*([\d.,]+)/i);
+      let oKGm = region.match(/Net\s+weight\s+in\s+kg\s+in\s+other:\s*([\d.,]+)/i);
       if(oKGm) otherKG = parseNum(oKGm[1]);
 
-      const oVall = [...region.matchAll(/Other\s+value:\s*([\d.,]+)/gi)];
+      let oVall = [...region.matchAll(/Other\s+value:\s*([\d.,]+)/gi)];
       if(oVall.length) otherVal = parseNum(oVall[0][1]);
+
+      // Fallback: if still missing, widen once within slab (but cap to avoid crossing into next item)
+      if(!isFinite(steelVal)){
+        const wide = slab.slice(regionStart, Math.min(regionStart+2000, slab.length));
+        const s2 = wide.match(/Steel\s+value:\s*([\d.,]+)/i); if(s2) steelVal = parseNum(s2[1]);
+      }
+      if(!isFinite(otherVal)){
+        const wide = slab.slice(regionStart, Math.min(regionStart+2000, slab.length));
+        const o2 = wide.match(/Other\s+value:\s*([\d.,]+)/i); if(o2) otherVal = parseNum(o2[1]);
+      }
 
       // Unit price per selling unit
       const unitPrice = (isFinite(it.unitPricePer) && isFinite(it.perDivisor) && it.perDivisor>0)
@@ -357,7 +377,7 @@
     });
   }
 
-  // --------- UI ----------
+  // UI
   function buildUI(){
     UI.bar.style.display='flex';
 
@@ -379,11 +399,14 @@
     UI.invSel.onchange = ()=>{ CURRENT = UI.invSel.value; if(CURRENT){ renderInvoice(CURRENT); } };
     UI.exportBtn.onclick = exportExcel;
 
-    // Auto-load first invoice
+    // Auto load first invoice
     CURRENT = ORDER[0]; UI.invSel.value = CURRENT; renderInvoice(CURRENT);
 
-    // Tab order for header
-    UI.invSel.tabIndex = 1; UI.supplierInp.tabIndex = 2; UI.dateInp.tabIndex = 3; UI.totalInp.tabIndex = 4;
+    // Header fields keyboard order
+    UI.invSel.tabIndex = 1;
+    UI.supplierInp.tabIndex = 2;
+    UI.dateInp.tabIndex = 3;
+    UI.totalInp.tabIndex = 4;
   }
 
   function renderInvoice(id){
@@ -404,13 +427,16 @@
     UI.stItems.textContent = String(rows.length);
     UI.stTotal.textContent = '$'+Number(meta.invoice_total||0).toFixed(2);
 
+    // Render table
     UI.rows.innerHTML = '';
-    rows.forEach((r, idx)=>{ UI.rows.appendChild(renderRow(r, idx)); });
+    rows.forEach((r, idx)=>{
+      UI.rows.appendChild(renderRow(r, idx));
+    });
 
     UI.table.style.display='block'; UI.stats.style.display='grid';
     recomputeStats();
 
-    // Header edits
+    // Editable header fields
     UI.supplierInp.onchange = e=> updateHdr('supplier', e.target.value);
     UI.dateInp.onchange = e=> updateHdr('invoice_date', e.target.value);
     UI.totalInp.onchange = e=> { updateHdr('invoice_total', e.target.value); recomputeStats(); };
@@ -421,6 +447,7 @@
 
   function renderRow(row, idx){
     const tr = document.createElement('tr');
+
     function tdInput(val, key, readOnly=false){
       const td = document.createElement('td');
       const inp = document.createElement('input');
@@ -432,6 +459,7 @@
       inp.onkeydown = (ev)=> handleCellKeydown(ev);
       td.appendChild(inp); return td;
     }
+
     const actions = document.createElement('td'); actions.className='actions';
     const add = document.createElement('button'); add.className='btn add'; add.textContent='➕ Below'; add.onclick=()=> addBelow(idx);
     const del = document.createElement('button'); del.className='btn del'; del.textContent='🗑️'; del.onclick=()=> removeRow(idx);
@@ -446,6 +474,7 @@
     tr.appendChild(tdInput(row.net_weight,'net_weight'));
     tr.appendChild(tdInput(row.country_of_origin,'country_of_origin'));
     tr.appendChild(actions);
+
     return tr;
   }
 
@@ -502,8 +531,11 @@
     UI.stDiff.textContent = '$'+diff.toFixed(2);
   }
 
-  // ---- Keyboard nav ----
-  function rebuildTabOrder(){ let ti = 10; $$('#rows input').forEach(inp=>{ inp.tabIndex = ti++; }); }
+  // Keyboard navigation
+  function rebuildTabOrder(){
+    let ti = 10; // after header
+    $$('#rows input').forEach(inp=>{ inp.tabIndex = ti++; });
+  }
   function focusNext(current, dir){
     const inputs = [UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp, ...$$('#rows input')].filter(Boolean);
     const idx = inputs.indexOf(current);
@@ -512,7 +544,44 @@
     if(target){ target.focus(); target.select?.(); }
   }
   function handleCellKeydown(ev){
-    if(ev.key === 'Enter'){ ev.preventDefault(); focusNext(ev.target, ev.shiftKey ? -1 : 1); }
+    if(ev.key === 'Enter'){
+      ev.preventDefault();
+      focusNext(ev.target, ev.shiftKey ? -1 : 1);
+    }
+  }
+
+  // Export
+  function exportExcel(){
+    const wb = XLSX.utils.book_new();
+    const byInv = {};
+    ALL.forEach(r=>{ if(!byInv[r.invoice_number]) byInv[r.invoice_number] = []; byInv[r.invoice_number].push(r); });
+    Object.keys(byInv).forEach(id=>{
+      const rows = byInv[id].slice().sort((a,b)=>{
+        const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+        const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+        const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
+        if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
+      });
+      const head = [
+        ['Invoice', id],
+        ['Date', rows[0]?.invoice_date||''],
+        ['Supplier', rows[0]?.supplier||''],
+        ['Invoice Total', rows[0]?.invoice_total||''],
+        [],
+        ['Pos','Part Number','Quantity','Unit','Unit Price','Line Total','Net Weight (kg)','COO']
+      ];
+      const body = rows.map(r=>[
+        r.position||'', r.part_number||'', r.quantity||'', r.unit||'', r.unit_price||'', r.line_total||'', r.net_weight||'', r.country_of_origin||''
+      ]);
+      const ws = XLSX.utils.aoa_to_sheet([...head, ...body]);
+      XLSX.utils.book_append_sheet(wb, ws, ('INV_'+id).slice(0,31));
+    });
+    const out = XLSX.write(wb, {type:'array', bookType:'xlsx'});
+    const blob = new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = (filename? filename + '_' : '') + 'grass_parsed.xlsx';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   }
 </script>
 </body>
