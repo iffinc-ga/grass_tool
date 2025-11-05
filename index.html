@@ -68,7 +68,7 @@
   <div class="wrap">
     <div class="header">
       <h1>Grass Invoice PDF Parser (Steel/Other sublines)</h1>
-      <p>Drop in a Grass consolidated invoice PDF. The tool extracts lines, subtracts Steel/Other allocations from the main line, and inserts S/A sublines directly below the base line.</p>
+      <p>Drop in a Grass consolidated invoice PDF. The tool extracts lines, subtracts Steel/Other allocations from the main line, and inserts S/A sublines below the base line.</p>
     </div>
 
     <div class="upload" id="upload">
@@ -151,8 +151,8 @@
     newBtn: $('#newBtn'),
   };
 
-  let ALL = []; // parsed rows
-  let ORDER = []; // invoice numbers
+  let ALL = [];
+  let ORDER = [];
   let CURRENT = '';
   let filename = '';
 
@@ -261,7 +261,7 @@
     items.forEach((it, i)=>{
       const start = it.idx;
       const end = (i < items.length-1 ? items[i+1].idx : start + 2000);
-      let slab = big.slice(start, end);
+      const slab = big.slice(start, end);
 
       // COO
       let coo = '';
@@ -271,23 +271,26 @@
       let netkg = '';
       const wM = slab.match(/Net\s+weight\s+in\s+kg:\s*([\d.,]+)/i); if(wM) netkg = fmt2(parseNum(wM[1]));
 
-      // Scope steel/other region right after “Net weight in kg:”
+      // ---- Steel/Other scoping: start at the item's "Net weight in kg:" line and search forward in a short window ----
       let steelKG=NaN, steelVal=NaN, otherKG=NaN, otherVal=NaN;
       const netIdx = slab.search(/Net\s+weight\s+in\s+kg:/i);
       const regionStart = netIdx >= 0 ? netIdx : 0;
-      const regionEnd = Math.min(regionStart + 600, slab.length); // widen if needed
+      const regionEnd = Math.min(regionStart + 1200, slab.length); // widened to capture late-appearing values like 8,534.09
       const region = slab.slice(regionStart, regionEnd);
 
       const sKGm = region.match(/Net\s+weight\s+in\s+kg\s+in\s+steel:\s*([\d.,]+)/i);
-      const sVm  = region.match(/Steel\s+value:\s*([\d.,]+)/i);
-      const oKGm = region.match(/Net\s+weight\s+in\s+kg\s+in\s+other:\s*([\d.,]+)/i);
-      const oVm  = region.match(/Other\s+value:\s*([\d.,]+)/i);
       if(sKGm) steelKG = parseNum(sKGm[1]);
-      if(sVm)  steelVal = parseNum(sVm[1]);
-      if(oKGm) otherKG  = parseNum(oKGm[1]);
-      if(oVm)  otherVal = parseNum(oVm[1]);
 
-      // Compute USD per selling unit
+      const sVall = [...region.matchAll(/Steel\s+value:\s*([\d.,]+)/gi)];
+      if(sVall.length) steelVal = parseNum(sVall[0][1]);
+
+      const oKGm = region.match(/Net\s+weight\s+in\s+kg\s+in\s+other:\s*([\d.,]+)/i);
+      if(oKGm) otherKG = parseNum(oKGm[1]);
+
+      const oVall = [...region.matchAll(/Other\s+value:\s*([\d.,]+)/gi)];
+      if(oVall.length) otherVal = parseNum(oVall[0][1]);
+
+      // Unit price per selling unit
       const unitPrice = (isFinite(it.unitPricePer) && isFinite(it.perDivisor) && it.perDivisor>0)
         ? (it.unitPricePer / it.perDivisor)
         : '';
@@ -295,7 +298,7 @@
       // Position
       const pos = (i+1).toString();
 
-      // Subtract steel/other from main line
+      // Subtract steel/other from base line
       let baseTotal = it.lineTotal;
       const subSteel = isFinite(steelVal)? steelVal : 0;
       const subOther = isFinite(otherVal)? otherVal : 0;
@@ -317,7 +320,7 @@
         country_of_origin: coo
       });
 
-      // Steel subline (S)
+      // Steel subline
       if(isFinite(subSteel) && subSteel>0){
         ALL.push({
           invoice_number: invNum,
@@ -334,7 +337,7 @@
           country_of_origin: coo
         });
       }
-      // Other subline (A)
+      // Other subline
       if(isFinite(subOther) && subOther>0){
         ALL.push({
           invoice_number: invNum,
@@ -379,11 +382,8 @@
     // Auto-load first invoice
     CURRENT = ORDER[0]; UI.invSel.value = CURRENT; renderInvoice(CURRENT);
 
-    // Header input tab order
-    UI.invSel.tabIndex = 1;
-    UI.supplierInp.tabIndex = 2;
-    UI.dateInp.tabIndex = 3;
-    UI.totalInp.tabIndex = 4;
+    // Tab order for header
+    UI.invSel.tabIndex = 1; UI.supplierInp.tabIndex = 2; UI.dateInp.tabIndex = 3; UI.totalInp.tabIndex = 4;
   }
 
   function renderInvoice(id){
@@ -404,27 +404,23 @@
     UI.stItems.textContent = String(rows.length);
     UI.stTotal.textContent = '$'+Number(meta.invoice_total||0).toFixed(2);
 
-    // Render table
     UI.rows.innerHTML = '';
-    rows.forEach((r, idx)=>{
-      UI.rows.appendChild(renderRow(r, idx, rows));
-    });
+    rows.forEach((r, idx)=>{ UI.rows.appendChild(renderRow(r, idx)); });
 
     UI.table.style.display='block'; UI.stats.style.display='grid';
     recomputeStats();
 
-    // Editable header fields
+    // Header edits
     UI.supplierInp.onchange = e=> updateHdr('supplier', e.target.value);
     UI.dateInp.onchange = e=> updateHdr('invoice_date', e.target.value);
     UI.totalInp.onchange = e=> { updateHdr('invoice_total', e.target.value); recomputeStats(); };
 
-    // Rebuild tabindex for body cells after render
+    // Rebuild tabindex for body cells
     rebuildTabOrder();
   }
 
   function renderRow(row, idx){
     const tr = document.createElement('tr');
-
     function tdInput(val, key, readOnly=false){
       const td = document.createElement('td');
       const inp = document.createElement('input');
@@ -436,7 +432,6 @@
       inp.onkeydown = (ev)=> handleCellKeydown(ev);
       td.appendChild(inp); return td;
     }
-
     const actions = document.createElement('td'); actions.className='actions';
     const add = document.createElement('button'); add.className='btn add'; add.textContent='➕ Below'; add.onclick=()=> addBelow(idx);
     const del = document.createElement('button'); del.className='btn del'; del.textContent='🗑️'; del.onclick=()=> removeRow(idx);
@@ -451,7 +446,6 @@
     tr.appendChild(tdInput(row.net_weight,'net_weight'));
     tr.appendChild(tdInput(row.country_of_origin,'country_of_origin'));
     tr.appendChild(actions);
-
     return tr;
   }
 
@@ -509,10 +503,7 @@
   }
 
   // ---- Keyboard nav ----
-  function rebuildTabOrder(){
-    let ti = 10; // after header controls
-    $$('#rows input').forEach(inp=>{ inp.tabIndex = ti++; });
-  }
+  function rebuildTabOrder(){ let ti = 10; $$('#rows input').forEach(inp=>{ inp.tabIndex = ti++; }); }
   function focusNext(current, dir){
     const inputs = [UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp, ...$$('#rows input')].filter(Boolean);
     const idx = inputs.indexOf(current);
@@ -521,44 +512,7 @@
     if(target){ target.focus(); target.select?.(); }
   }
   function handleCellKeydown(ev){
-    if(ev.key === 'Enter'){
-      ev.preventDefault();
-      focusNext(ev.target, ev.shiftKey ? -1 : 1);
-    }
-  }
-
-  // ---- Export ----
-  function exportExcel(){
-    const wb = XLSX.utils.book_new();
-    const byInv = {};
-    ALL.forEach(r=>{ if(!byInv[r.invoice_number]) byInv[r.invoice_number] = []; byInv[r.invoice_number].push(r); });
-    Object.keys(byInv).forEach(id=>{
-      const rows = byInv[id].slice().sort((a,b)=>{
-        const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
-        const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
-        const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
-        if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
-      });
-      const head = [
-        ['Invoice', id],
-        ['Date', rows[0]?.invoice_date||''],
-        ['Supplier', rows[0]?.supplier||''],
-        ['Invoice Total', rows[0]?.invoice_total||''],
-        [],
-        ['Pos','Part Number','Quantity','Unit','Unit Price','Line Total','Net Weight (kg)','COO']
-      ];
-      const body = rows.map(r=>[
-        r.position||'', r.part_number||'', r.quantity||'', r.unit||'', r.unit_price||'', r.line_total||'', r.net_weight||'', r.country_of_origin||''
-      ]);
-      const ws = XLSX.utils.aoa_to_sheet([...head, ...body]);
-      XLSX.utils.book_append_sheet(wb, ws, ('INV_'+id).slice(0,31));
-    });
-    const out = XLSX.write(wb, {type:'array', bookType:'xlsx'});
-    const blob = new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = (filename? filename + '_' : '') + 'grass_parsed.xlsx';
-    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+    if(ev.key === 'Enter'){ ev.preventDefault(); focusNext(ev.target, ev.shiftKey ? -1 : 1); }
   }
 </script>
 </body>
