@@ -1,667 +1,629 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Grass Tool</title>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Grass Invoice PDF Parser — Steel/Other Sublines</title>
+  <!-- Libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Inter,system-ui,Arial,sans-serif;background:#f6f7fb;color:#111}
+    .wrap{max-width:1800px;margin:24px auto;background:#fff;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.06);overflow:hidden}
+    .header{padding:28px 32px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff}
+    .header h1{font-size:22px;font-weight:800;margin-bottom:6px}
+    .header p{opacity:.9}
+
+    .upload{padding:28px}
+    .drop{border:2px dashed #c7d2fe;border-radius:14px;padding:36px;text-align:center;cursor:pointer;transition:.2s}
+    .drop:hover{background:#f8fafc}
+    #fileInput{display:none}
+
+    .loading{padding:28px;display:none;text-align:center}
+    .spinner{border:4px solid #e5e7eb;border-top:4px solid #6366f1;border-radius:50%;width:44px;height:44px;margin:0 auto 12px;animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    .bar{display:flex;gap:12px;align-items:center;padding:16px 20px;background:#f8fafc;border-top:1px solid #eef2ff;border-bottom:1px solid #eef2ff}
+    .bar select,.bar input{padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;min-width:320px}
+    .bar button{padding:10px 14px;border:0;border-radius:10px;background:#111;color:#fff;font-weight:700;cursor:pointer}
+    .bar .ghost{background:#eef2ff;color:#111}
+
+    .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;padding:16px 20px;background:#fff}
+    .stat{border:1px solid #eef2ff;border-radius:12px;padding:12px}
+    .stat .label{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#6b7280;margin-bottom:6px}
+    .stat .val{font-size:18px;font-weight:800}
+    .stat input{width:100%;padding:8px;border:1px solid #e5e7eb;border-radius:10px;font-weight:700}
+
+    .table{border-top:1px solid #eef2ff}
+    .thead{background:#111;color:#fff;overflow:auto}
+    .tbody{max-height:62vh;overflow:auto}
+    .thead table,.tbody table{width:100%;table-layout:fixed;border-collapse:collapse}
+    th,td{padding:10px 8px;border-bottom:1px solid #f1f5f9}
+    th{font-size:12px;text-align:left}
+    td input{width:100%;padding:6px;border:1px solid #e5e7eb;border-radius:8px}
+    .readonly{background:#f3f4f6}
+    .actions{white-space:nowrap}
+    .btn{padding:6px 10px;border:0;border-radius:8px;cursor:pointer}
+    .btn.del{background:#fee2e2}
+    .btn.add{background:#dbeafe}
+
+    /* Column widths */
+    .col-pos{width:64px}
+    .col-part{width:260px}
+    .col-qty{width:100px}
+    .col-unit{width:72px}
+    .col-price{width:120px}
+    .col-total{width:130px}
+    .col-weight{width:120px}
+    .col-coo{width:80px}
+    .col-act{width:160px}
+
+    .alert{display:none;margin:12px 20px;padding:10px 12px;border-radius:10px;border:1px solid}
+    .alert.ok{display:block;background:#ecfdf5;border-color:#a7f3d0;color:#065f46}
+    .alert.err{display:block;background:#fef2f2;border-color:#fecaca;color:#991b1b}
+  </style>
 </head>
 <body>
-    <div id="root"></div>
+  <div class="wrap">
+    <div class="header">
+      <h1>Grass Invoice PDF Parser (Steel/Other sublines)</h1>
+      <p>Drop in a Grass consolidated invoice PDF. The tool extracts lines, subtracts Steel/Other allocations from the main line, and inserts S/A sublines directly below the base line.</p>
+    </div>
 
-    <script type="text/babel">
-        const { useState, useRef, useEffect } = React;
+    <div class="upload" id="upload">
+      <div class="drop" id="drop">
+        <h3>📤 Click or Drag & Drop a PDF</h3>
+        <p style="margin-top:6px;color:#6b7280">Optimized for Grass format (e.g., “Invoice 4543720 …”, “Net weight in kg in steel/other”, DE/CZ COO).</p>
+        <input id="fileInput" type="file" accept="application/pdf,.pdf" />
+      </div>
+    </div>
 
-        // Lucide Icons as inline SVG components
-        const Upload = ({ className }) => (
-            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-            </svg>
-        );
+    <div class="loading" id="loading">
+      <div class="spinner"></div>
+      <div><strong>Parsing PDF text…</strong></div>
+    </div>
 
-        const Copy = ({ className }) => (
-            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-            </svg>
-        );
+    <div class="alert" id="alert"></div>
 
-        const Download = ({ className }) => (
-            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-            </svg>
-        );
+    <div class="bar" id="bar" style="display:none">
+      <select id="invoiceSel"><option value="">Select an invoice…</option></select>
+      <input id="supplierInp" placeholder="Supplier (edit)" />
+      <input id="dateInp" placeholder="Invoice Date MM/DD/YYYY" />
+      <input id="totalInp" type="number" step="0.01" placeholder="Invoice Total (USD)" />
+      <button id="exportBtn">Export to Excel</button>
+      <button id="exportCiBtn" class="ghost">Export CI Template</button>
+      <button id="newBtn" class="ghost">New Upload</button>
+    </div>
 
-        const Trash = ({ className }) => (
-            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
-        );
+    <div class="stats" id="stats" style="display:none">
+      <div class="stat"><div class="label">Invoice</div><div class="val" id="stInv">-</div></div>
+      <div class="stat"><div class="label">Items</div><div class="val" id="stItems">0</div></div>
+      <div class="stat"><div class="label">Invoice Total</div><div class="val" id="stTotal">$0.00</div></div>
+      <div class="stat"><div class="label">Sum of Lines</div><div class="val" id="stSum">$0.00</div></div>
+      <div class="stat"><div class="label">Difference</div><div class="val" id="stDiff">$0.00</div></div>
+    </div>
 
-        const AlertCircle = ({ className }) => (
-            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-        );
+    <div class="table" id="table" style="display:none">
+      <div class="thead" id="thead">
+        <table><thead><tr>
+          <th class="col-pos">Pos</th>
+          <th class="col-part">Part Number / Description</th>
+          <th class="col-qty">Quantity</th>
+          <th class="col-unit">Unit</th>
+          <th class="col-price">Unit Price</th>
+          <th class="col-total">Line Total</th>
+          <th class="col-weight">Net Weight (kg)</th>
+          <th class="col-coo">COO</th>
+          <th class="col-act">Actions</th>
+        </tr></thead></table>
+      </div>
+      <div class="tbody" id="tbody">
+        <table><tbody id="rows"></tbody></table>
+      </div>
+    </div>
+  </div>
 
-        const CheckCircle = ({ className }) => (
-            <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-        );
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-        function GrassTool() {
-            const [invoiceData, setInvoiceData] = useState([]);
-            const [grassDbData, setGrassDbData] = useState([]);
-            const [tariffMappings, setTariffMappings] = useState([]);
-            const [selectedRow, setSelectedRow] = useState(null);
-            const [message, setMessage] = useState(null);
-            const [fileName, setFileName] = useState('');
-            const [dbLoaded, setDbLoaded] = useState(false);
-            const [quantity, setQuantity] = useState('');
-            const [unitPrice, setUnitPrice] = useState('');
-            const [itemTotal, setItemTotal] = useState('');
-            const [nextGroupId, setNextGroupId] = useState(1);
-            const [duplicateCount, setDuplicateCount] = useState(0);
-            const [lastSelectedRow, setLastSelectedRow] = useState(null);
-            
-            const fileInputRef = useRef(null);
+  const $ = sel => document.querySelector(sel);
+  const $$ = sel => Array.from(document.querySelectorAll(sel));
 
-            // Load the Grass DB on component mount
-            useEffect(() => {
-                loadGrassDb();
-            }, []);
+  const UI = {
+    upload: $('#upload'),
+    drop: $('#drop'),
+    file: $('#fileInput'),
+    loading: $('#loading'),
+    alert: $('#alert'),
+    bar: $('#bar'),
+    invSel: $('#invoiceSel'),
+    supplierInp: $('#supplierInp'),
+    dateInp: $('#dateInp'),
+    totalInp: $('#totalInp'),
+    stats: $('#stats'),
+    stInv: $('#stInv'),
+    stItems: $('#stItems'),
+    stTotal: $('#stTotal'),
+    stSum: $('#stSum'),
+    stDiff: $('#stDiff'),
+    table: $('#table'),
+    thead: $('#thead'),
+    tbody: $('#tbody'),
+    rows: $('#rows'),
+    exportBtn: $('#exportBtn'),
+    exportCiBtn: $('#exportCiBtn'),
+    newBtn: $('#newBtn'),
+  };
 
-            const loadGrassDb = async () => {
-                try {
-                    const response = await fetch('updated_grass_db.xlsx');
-                    if (!response.ok) {
-                        throw new Error('Grass DB file not found. Make sure updated_grass_db.xlsx is in the same directory.');
-                    }
-                    
-                    const arrayBuffer = await response.arrayBuffer();
-                    const workbook = XLSX.read(arrayBuffer);
-                    
-                    // Load main database
-                    const mainSheet = workbook.Sheets[workbook.SheetNames[0]];
-                    const mainData = XLSX.utils.sheet_to_json(mainSheet, { defval: "" });
-                    setGrassDbData(mainData);
-                    
-                    // Load Sheet1 for tariff mappings
-                    const sheet1 = workbook.Sheets['Sheet1'];
-                    const mappings = XLSX.utils.sheet_to_json(sheet1, { header: 1, defval: "" });
-                    setTariffMappings(mappings.slice(1)); // Skip header row
-                    
-                    setDbLoaded(true);
-                    setMessage({ type: 'success', text: `Grass DB loaded successfully (${mainData.length} parts, ${mappings.length - 1} tariff mappings)` });
-                } catch (error) {
-                    setMessage({ type: 'error', text: 'Error loading Grass DB: ' + error.message });
-                }
-            };
+  // Keep everything for multiple invoices in a single upload
+  let ALL = []; // [{ invoice_number, invoice_date, supplier, invoice_total, position, part_number, quantity, unit, unit_price, line_total, net_weight, country_of_origin }]
+  let ORDER = []; // invoice order
+  let CURRENT = '';
+  let filename = '';
 
-            const handleFileUpload = (event) => {
-                const file = event.target.files[0];
-                if (!file) return;
+  // === Helpers ===
+  function showAlert(msg, ok=true){
+    UI.alert.className = 'alert ' + (ok?'ok':'err');
+    UI.alert.textContent = msg; UI.alert.style.display='block';
+    setTimeout(()=> UI.alert.style.display='none', 3200);
+  }
 
-                setFileName(file.name);
-                const reader = new FileReader();
-                
-                reader.onload = (e) => {
-                    try {
-                        const data = new Uint8Array(e.target.result);
-                        const workbook = XLSX.read(data, { type: 'array' });
-                        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
-                        const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
-                        
-                        setInvoiceData(jsonData);
-                        setSelectedRow(null);
-                        setDuplicateCount(0);
-                        setLastSelectedRow(null);
-                        setMessage({ type: 'success', text: `Loaded ${jsonData.length} rows from ${file.name}` });
-                    } catch (error) {
-                        setMessage({ type: 'error', text: 'Error reading file: ' + error.message });
-                    }
-                };
-                
-                reader.readAsArrayBuffer(file);
-            };
+  function parseNum(s){
+    if(s==null) return NaN;
+    const t = String(s).trim();
+    if(!t) return NaN;
+    // Handle European format like 1.240,03 and US like 1,240.03
+    if(/\d+[.,]\d{3}[.,]\d{2}$/.test(t)){
+      // assume last separator is decimal
+      const last = t.lastIndexOf('.')>t.lastIndexOf(',')?'.':',';
+      const intPart = t.slice(0, t.lastIndexOf(last)).replace(/[.,\s]/g,'');
+      const decPart = t.slice(t.lastIndexOf(last)+1);
+      return parseFloat(intPart + '.' + decPart);
+    }
+    // If comma decimals e.g. 1240,03
+    if(/,\d{2}$/.test(t) && !/\.\d{2}$/.test(t)){
+      return parseFloat(t.replace(/\./g,'').replace(',','.'));
+    }
+    // Plain
+    return parseFloat(t.replace(/,/g,''));
+  }
 
-            const findTariffValue = (partNumber, materialType) => {
-                // Normalize the part number for comparison (convert to string and trim)
-                const normalizedPartNumber = String(partNumber || '').trim();
-                
-                // Find the part in Grass DB
-                const part = grassDbData.find(row => {
-                    const dbPartNum = String(row['PRIMARY PART NUM'] || '').trim();
-                    return dbPartNum === normalizedPartNumber;
-                });
-                
-                if (!part) {
-                    return { found: false, reason: `Part number ${partNumber} not found in Grass DB` };
-                }
+  function fmt2(n){ const x = Number(n); return isFinite(x)? x.toFixed(2):''; }
+  function toUS(mmddyyyy){
+    // from dd.mm.yyyy
+    const m = String(mmddyyyy||'').match(/(\d{2})\.(\d{2})\.(\d{4})/);
+    if(m){ return `${m[2]}/${m[1]}/${m[3]}`; }
+    return mmddyyyy||'';
+  }
 
-                // Look for tariff numbers that do NOT start with 9
-                const tariffColumns = ['TARIFF NUM', 'TARIFF NUM_1', 'TARIFF NUM_2', 'TARIFF NUM_3', 'TARIFF NUM_4'];
-                let tariffNumber = null;
-                
-                for (const col of tariffColumns) {
-                    const tariff = String(part[col] || '');
-                    if (tariff && !tariff.startsWith('9')) {
-                        tariffNumber = tariff;
-                        break;
-                    }
-                }
+  function sumLines(list){
+    return list.reduce((a,r)=> a + (parseNum(r.line_total)||0), 0);
+  }
 
-                if (!tariffNumber) {
-                    return { found: false, reason: 'No valid tariff number found (all start with 9)' };
-                }
+  function nextLetterPos(base){
+    const num = String(base||'').replace(/[^0-9].*$/,'') || '0';
+    return num + (Math.random()<0.5?'S':'A');
+  }
 
-                // Check if tariff exists in Sheet1 mappings
-                const mapping = tariffMappings.find(row => {
-                    const tariffCol = String(row[0] || '').trim();
-                    const normalizedTariff = String(tariffNumber).trim();
-                    return tariffCol === normalizedTariff;
-                });
+  // === Upload Handlers ===
+  UI.drop.addEventListener('click', ()=> UI.file.click());
+  UI.file.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f); });
+  UI.drop.addEventListener('dragover', e=>{ e.preventDefault(); UI.drop.style.background='#f1f5ff'; });
+  UI.drop.addEventListener('dragleave', ()=> UI.drop.style.background='');
+  UI.drop.addEventListener('drop', e=>{ e.preventDefault(); UI.drop.style.background=''; const f=e.dataTransfer.files?.[0]; if(f) handleFile(f); });
 
-                // Determine which column to use based on material type
-                // Column 1 = Aluminum, Column 2 = Steel
-                const columnIndex = materialType === 'aluminum' ? 1 : 2;
-                
-                if (mapping && mapping[columnIndex]) {
-                    return { found: true, value: mapping[columnIndex], tariff: tariffNumber, materialType };
-                }
+  UI.newBtn.addEventListener('click', ()=> location.reload());
 
-                // Default based on material type if no mapping found
-                const defaultValue = materialType === 'aluminum' ? 'ALUM EXCL GENERIC' : 'STEEL EXCL GENERIC';
-                return { found: true, value: defaultValue, tariff: tariffNumber, usingDefault: true, materialType };
-            };
+  async function handleFile(file){
+    if(!/\.pdf$/i.test(file.name)){ showAlert('Please upload a PDF file', false); return; }
+    filename = file.name.replace(/\.pdf$/i,'');
+    UI.upload.style.display='none'; UI.loading.style.display='block';
+    try{
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const pdf = await pdfjsLib.getDocument({data:buf}).promise;
+      let text = '';
+      for(let i=1;i<=pdf.numPages;i++){
+        try{
+          const page = await pdf.getPage(i);
+          const tc = await page.getTextContent({includeMarkedContent:true});
+          text += (tc.items||[]).map(it=> it?.str || '').join(' ') + "\n";
+        }catch(e){ console.warn('page read failed', i, e); }
+      }
+      if(!text.trim()){ showAlert('PDF has no extractable text (maybe scanned). Try OCR.', false); UI.upload.style.display='block'; return; }
+      parseGrass(text);
+      if(ALL.length){
+        buildUI();
+        showAlert(`Found ${new Set(ALL.map(x=>x.invoice_number)).size} invoice(s), ${ALL.length} row(s)`, true);
+      }else{
+        showAlert('No invoice rows were parsed. Try another file or adjust patterns.', false);
+        UI.upload.style.display='block';
+      }
+    }catch(err){ console.error(err); showAlert('Error: '+(err.message||String(err)), false); UI.upload.style.display='block'; }
+    finally{ UI.loading.style.display='none'; }
+  }
 
-            const duplicateRow = (materialType) => {
-                if (selectedRow === null) {
-                    setMessage({ type: 'error', text: 'Please select a row to duplicate' });
-                    return;
-                }
+  // === Parser for Grass format ===
+  function parseGrass(text){
+    ALL.length = 0; ORDER.length = 0;
+    const big = String(text||'');
 
-                // Reset duplicate count if we've selected a different row
-                if (lastSelectedRow !== selectedRow) {
-                    setDuplicateCount(0);
-                    setLastSelectedRow(selectedRow);
-                }
+    // Invoice number
+    const invMatch = [...big.matchAll(/Invoice\s+(\d{5,})/gi)];
+    const invNum = invMatch.length? invMatch[0][1] : 'UNKNOWN';
+    if(!ORDER.includes(invNum)) ORDER.push(invNum);
 
-                const rowToDuplicate = invoiceData[selectedRow];
-                const partNumber = rowToDuplicate.BuyerPartNumber;
-                
-                // Get the tariff value based on material type
-                const tariffResult = findTariffValue(partNumber, materialType);
-                
-                if (!tariffResult.found) {
-                    setMessage({ type: 'error', text: tariffResult.reason });
-                    return;
-                }
+    // Date
+    let invDate = '';
+    const dm = big.match(/Date:\s*(\d{2}\.\d{2}\.\d{4})/); if(dm) invDate = toUS(dm[1]);
 
-                // Create new row with updated part numbers
-                const newRow = { ...rowToDuplicate };
-                newRow.BuyerPartNumber = tariffResult.value;
-                newRow.SupplierPartNumber = tariffResult.value;
-                newRow._isDuplicate = true; // Mark as duplicate for deletion tracking
+    // Supplier (from header block: Grass GmbH Österreich)
+    let supplier = 'GRASS GmbH';
+    const supm = big.match(/Grass\s+GmbH[^\n]*|GRASS\s+GmbH[^\n]*/i);
+    if(supm) supplier = supm[0].trim();
 
-                // Check if custom values were provided
-                const hasCustomValues = quantity !== '' || unitPrice !== '' || itemTotal !== '';
-                let newRowItemTotal = rowToDuplicate.ItemTotal; // Default to original
-                let subtractedQuantity = 0;
+    // Invoice total (Total Amount 206,231.03 USD)
+    let invTotal = '';
+    const tm = big.match(/Total\s+Amount\s+([\d.,]+)\s+USD/i);
+    if(tm) invTotal = String(parseNum(tm[1])||'');
 
-                // Apply custom values if provided, otherwise keep original values
-                if (quantity !== '') {
-                    newRow.Quantity = parseFloat(quantity);
-                }
-                if (unitPrice !== '') {
-                    newRow.UnitPrice = parseFloat(unitPrice);
-                }
-                if (itemTotal !== '') {
-                    newRow.ItemTotal = parseFloat(itemTotal);
-                    newRowItemTotal = parseFloat(itemTotal);
-                } else if (quantity !== '' && unitPrice !== '') {
-                    // Auto-calculate ItemTotal if Quantity and UnitPrice are provided but ItemTotal is not
-                    newRow.ItemTotal = parseFloat(quantity) * parseFloat(unitPrice);
-                    newRowItemTotal = parseFloat(quantity) * parseFloat(unitPrice);
-                } else if (quantity !== '' || unitPrice !== '') {
-                    // If only one of quantity or unitPrice is provided, recalculate ItemTotal
-                    const finalQuantity = quantity !== '' ? parseFloat(quantity) : rowToDuplicate.Quantity;
-                    const finalUnitPrice = unitPrice !== '' ? parseFloat(unitPrice) : rowToDuplicate.UnitPrice;
-                    newRow.ItemTotal = finalQuantity * finalUnitPrice;
-                    newRowItemTotal = finalQuantity * finalUnitPrice;
-                }
+    // Split into item sections by article number lines. Example: F058139894217 1000 PCS 1,240.03 / 1000 1.240,03 USD
+    const itemRegex = /\b(F\d{9,})\s+(\d+[\d.,]*)\s+(PCS|PC|SET|PAIRS?)\s+([\d.,]+)\s*\/\s*(\d+)\s+([\d.,]+)\s+USD/gi;
 
-                // If custom values were provided, reduce the original row's ItemTotal
-                let updatedOriginalRow = rowToDuplicate;
-                if (hasCustomValues) {
-                    updatedOriginalRow = { ...rowToDuplicate };
-                    updatedOriginalRow.ItemTotal = (rowToDuplicate.ItemTotal || 0) - newRowItemTotal;
-                    
-                    // Store the subtracted amount on the duplicate for restoration later
-                    newRow._subtractedItemTotal = newRowItemTotal;
-                    
-                    // Also update quantity if only quantity was changed
-                    if (quantity !== '' && unitPrice === '' && itemTotal === '') {
-                        subtractedQuantity = parseFloat(quantity);
-                        const remainingQty = (rowToDuplicate.Quantity || 0) - subtractedQuantity;
-                        updatedOriginalRow.Quantity = remainingQty;
-                        updatedOriginalRow.ItemTotal = remainingQty * (rowToDuplicate.UnitPrice || 0);
-                        newRow._subtractedQuantity = subtractedQuantity;
-                    }
-                }
+    const items = [];
+    let m;
+    while((m = itemRegex.exec(big)) !== null){
+      items.push({
+        idx: m.index,
+        part: m[1],
+        qty: parseNum(m[2]),
+        unit: m[3].toUpperCase(),
+        unitPricePer: parseNum(m[4]), // price per divisor
+        perDivisor: parseNum(m[5]),
+        lineTotal: parseNum(m[6]),
+      });
+    }
 
-                // Insert the updated original row and new row at the correct position
-                // to maintain creation order of duplicates
-                const insertPosition = selectedRow + duplicateCount + 1;
-                
-                const newData = hasCustomValues ? [
-                    ...invoiceData.slice(0, selectedRow),
-                    updatedOriginalRow,
-                    ...invoiceData.slice(selectedRow + 1, insertPosition),
-                    newRow,
-                    ...invoiceData.slice(insertPosition)
-                ] : [
-                    ...invoiceData.slice(0, insertPosition),
-                    newRow,
-                    ...invoiceData.slice(insertPosition)
-                ];
+    // If none found, bail
+    if(items.length===0){
+      // Create one editable row to avoid blank UI
+      ALL.push({invoice_number:invNum, invoice_date:invDate, supplier, invoice_total:invTotal, position:'', part_number:'', quantity:'', unit:'', unit_price:'', line_total:'', net_weight:'', country_of_origin:''});
+      return;
+    }
 
-                setInvoiceData(newData);
-                setDuplicateCount(duplicateCount + 1);
-                
-                const materialLabel = materialType === 'aluminum' ? 'Aluminum' : 'Steel';
-                let messageText = tariffResult.usingDefault 
-                    ? `Row duplicated for ${materialLabel} with default value. Tariff ${tariffResult.tariff} not found in mappings.`
-                    : `Row duplicated for ${materialLabel}! Applied: ${tariffResult.value} (Tariff: ${tariffResult.tariff})`;
-                
-                if (hasCustomValues) {
-                    messageText += ` Original row's ItemTotal reduced by ${newRowItemTotal.toFixed(2)}.`;
-                }
-                
-                setMessage({ type: 'success', text: messageText });
-                
-                // Clear the input fields after duplication
-                setQuantity('');
-                setUnitPrice('');
-                setItemTotal('');
-            };
+    // Harvest per-item meta from surrounding text windows
+    items.forEach((it, i)=>{
+      const start = it.idx;
+      const end = (i < items.length-1 ? items[i+1].idx : start + 2000);
+      const slab = big.slice(start, end);
 
-            const downloadFile = () => {
-                if (invoiceData.length === 0) {
-                    setMessage({ type: 'error', text: 'No data to download' });
-                    return;
-                }
+      // COO
+      let coo = '';
+      const cooM = slab.match(/Country\s+of\s+Origin:\s*([A-Z]{2})/i); if(cooM) coo = cooM[1].toUpperCase();
 
-                // Process the data to format dates correctly and remove internal properties
-                const processedData = invoiceData.map(row => {
-                    const newRow = { ...row };
-                    
-                    // Remove internal tracking properties
-                    delete newRow._duplicateGroupId;
-                    delete newRow._isDuplicate;
-                    delete newRow._subtractedItemTotal;
-                    delete newRow._subtractedQuantity;
-                    
-                    // Format date columns - convert to actual Date objects
-                    const dateColumns = ['InvoiceDate', 'PO_Date', 'DateOfExport'];
-                    dateColumns.forEach(col => {
-                        if (newRow[col]) {
-                            if (typeof newRow[col] === 'number') {
-                                // Excel serial date number
-                                const date = XLSX.SSF.parse_date_code(newRow[col]);
-                                newRow[col] = new Date(date.y, date.m - 1, date.d);
-                            } else if (typeof newRow[col] === 'string') {
-                                // String date
-                                const date = new Date(newRow[col]);
-                                if (!isNaN(date.getTime())) {
-                                    newRow[col] = date;
-                                }
-                            }
-                            // If already a Date object, keep it
-                        }
-                    });
-                    
-                    return newRow;
-                });
+      // Net weight
+      let netkg = '';
+      const wM = slab.match(/Net\s+weight\s+in\s+kg:\s*([\d.,]+)/i); if(wM) netkg = fmt2(parseNum(wM[1]));
 
-                const worksheet = XLSX.utils.json_to_sheet(processedData);
-                
-                // Apply mm/dd/yyyy format to date columns
-                const range = XLSX.utils.decode_range(worksheet['!ref']);
-                const header = XLSX.utils.sheet_to_json(worksheet, { header: 1 })[0];
-                
-                ['InvoiceDate', 'PO_Date', 'DateOfExport'].forEach(dateCol => {
-                    const colIndex = header.indexOf(dateCol);
-                    if (colIndex !== -1) {
-                        const colLetter = XLSX.utils.encode_col(colIndex);
-                        for (let row = 1; row <= range.e.r; row++) {
-                            const cellAddress = `${colLetter}${row + 1}`;
-                            if (worksheet[cellAddress] && worksheet[cellAddress].t !== 's') {
-                                worksheet[cellAddress].z = 'mm/dd/yyyy';
-                            }
-                        }
-                    }
-                });
-                
-                const workbook = XLSX.utils.book_new();
-                XLSX.utils.book_append_sheet(workbook, worksheet, 'Sheet1');
-                
-                const newFileName = fileName.replace('.xlsx', '_updated.xlsx');
-                XLSX.writeFile(workbook, newFileName);
-                
-                setMessage({ type: 'success', text: `File downloaded as ${newFileName}` });
-            };
+      // Steel & Other allocations lines exist after many items
+      // Patterns like: "Net weight in kg in steel: 103" + "Steel value: 1240.03" [+ "Other value: 355.59"]
+      let steelKG=NaN, steelVal=NaN, otherKG=NaN, otherVal=NaN;
+      const sKGm = slab.match(/Net\s+weight\s+in\s+kg\s+in\s+steel:\s*([\d.,]+)/i);
+      const sVm  = slab.match(/Steel\s+value:\s*([\d.,]+)/i);
+      const oKGm = slab.match(/Net\s+weight\s+in\s+kg\s+in\s+other:\s*([\d.,]+)/i);
+      const oVm  = slab.match(/Other\s+value:\s*([\d.,]+)/i);
+      if(sKGm) steelKG = parseNum(sKGm[1]);
+      if(sVm)  steelVal = parseNum(sVm[1]);
+      if(oKGm) otherKG  = parseNum(oKGm[1]);
+      if(oVm)  otherVal = parseNum(oVm[1]);
 
-            const deleteRow = (index) => {
-                const rowToDelete = invoiceData[index];
-                
-                // Only allow deletion of duplicated rows
-                if (!rowToDelete._isDuplicate) {
-                    setMessage({ type: 'error', text: 'Cannot delete original data rows. Only duplicated rows can be deleted.' });
-                    return;
-                }
+      // Compute unit price in USD per selling unit (unitPricePer was per "perDivisor")
+      const unitPrice = (isFinite(it.unitPricePer) && isFinite(it.perDivisor) && it.perDivisor>0)
+        ? (it.unitPricePer / it.perDivisor)
+        : '';
 
-                const newData = [...invoiceData];
-                
-                // If this duplicate had custom values that modified the original, restore them
-                if (rowToDelete._subtractedItemTotal !== undefined) {
-                    // Find the original row by searching backwards for the first non-duplicate
-                    let originalRowIndex = -1;
-                    for (let i = index - 1; i >= 0; i--) {
-                        if (!newData[i]._isDuplicate) {
-                            originalRowIndex = i;
-                            break;
-                        }
-                    }
-                    
-                    if (originalRowIndex !== -1) {
-                        // Restore the ItemTotal to the original row
-                        newData[originalRowIndex] = { ...newData[originalRowIndex] };
-                        newData[originalRowIndex].ItemTotal = (newData[originalRowIndex].ItemTotal || 0) + rowToDelete._subtractedItemTotal;
-                        
-                        // Restore the Quantity if it was also subtracted
-                        if (rowToDelete._subtractedQuantity !== undefined) {
-                            newData[originalRowIndex].Quantity = (newData[originalRowIndex].Quantity || 0) + rowToDelete._subtractedQuantity;
-                        }
-                    }
-                }
-                
-                // Remove the duplicate row
-                const finalData = newData.filter((_, i) => i !== index);
-                setInvoiceData(finalData);
-                
-                // Adjust selected row if necessary
-                if (selectedRow === index) {
-                    setSelectedRow(null);
-                } else if (selectedRow !== null && index < selectedRow) {
-                    setSelectedRow(selectedRow - 1);
-                }
-                
-                // Adjust duplicate count if we deleted a duplicate from the currently selected row
-                if (selectedRow !== null && index > selectedRow && duplicateCount > 0) {
-                    setDuplicateCount(duplicateCount - 1);
-                }
-                
-                setMessage({ type: 'success', text: 'Duplicated row deleted and original values restored.' });
-            };
+      // Position = sequential 1..N
+      const pos = (i+1).toString();
 
-            const updateRowValue = (index, field, value) => {
-                const newData = [...invoiceData];
-                const parsedValue = parseFloat(value);
-                
-                if (!isNaN(parsedValue) && parsedValue >= 0) {
-                    newData[index][field] = parsedValue;
-                    
-                    // Auto-calculate ItemTotal if Quantity or UnitPrice changes
-                    if (field === 'Quantity' || field === 'UnitPrice') {
-                        const qty = newData[index].Quantity || 0;
-                        const price = newData[index].UnitPrice || 0;
-                        newData[index].ItemTotal = qty * price;
-                    }
-                    
-                    setInvoiceData(newData);
-                }
-            };
+      // Adjust main line total by subtracting steel/other values if present
+      let baseTotal = it.lineTotal;
+      const subSteel = isFinite(steelVal)? steelVal : 0;
+      const subOther = isFinite(otherVal)? otherVal : 0;
+      if(isFinite(baseTotal)) baseTotal = Math.max(0, baseTotal - subSteel - subOther);
 
-            return (
-                <div className="min-h-screen bg-gradient-to-br from-green-50 to-emerald-50 p-6">
-                    <div className="max-w-7xl mx-auto">
-                        <div className="bg-white rounded-xl shadow-lg p-6 mb-6 sticky top-0 z-50">
-                            <h1 className="text-3xl font-bold text-gray-800 mb-2">Grass Tool</h1>
-                            <p className="text-gray-600 mb-6">Upload an invoice file, edit values directly in the table, select a row to duplicate for Aluminum or Steel, and delete duplicated rows as needed</p>
-                            
-                            {/* Message Display */}
-                            {message && (
-                                <div className={`mb-4 p-4 rounded-lg flex items-start gap-3 ${
-                                    message.type === 'success' ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'
-                                }`}>
-                                    {message.type === 'success' ? (
-                                        <CheckCircle className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
-                                    ) : (
-                                        <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-                                    )}
-                                    <p className={message.type === 'success' ? 'text-green-800' : 'text-red-800'}>{message.text}</p>
-                                </div>
-                            )}
+      // Push base item
+      ALL.push({
+        invoice_number: invNum,
+        invoice_date: invDate,
+        supplier,
+        invoice_total: invTotal,
+        position: pos,
+        part_number: it.part,
+        quantity: isFinite(it.qty)? fmt2(it.qty) : '',
+        unit: it.unit,
+        unit_price: isFinite(unitPrice) ? fmt2(unitPrice) : '',
+        line_total: isFinite(baseTotal) ? fmt2(baseTotal) : '',
+        net_weight: netkg,
+        country_of_origin: coo
+      });
 
-                            {/* Optional Values Input Section */}
-                            {invoiceData.length > 0 && (
-                                <div className="mb-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
-                                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Optional: Override Values for Duplicated Row</h3>
-                                    <div className="grid grid-cols-3 gap-4">
-                                        <div>
-                                            <label className="block text-xs font-medium text-gray-600 mb-1">Quantity</label>
-                                            <input
-                                                type="number"
-                                                value={quantity}
-                                                onChange={(e) => setQuantity(e.target.value)}
-                                                placeholder="Leave blank to use original"
-                                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-xs font-medium text-gray-600 mb-1">Unit Price</label>
-                                            <input
-                                                type="number"
-                                                step="0.01"
-                                                value={unitPrice}
-                                                onChange={(e) => setUnitPrice(e.target.value)}
-                                                placeholder="Leave blank to use original"
-                                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="block text-xs font-medium text-gray-600 mb-1">Item Total</label>
-                                            <input
-                                                type="number"
-                                                step="0.01"
-                                                value={itemTotal}
-                                                onChange={(e) => setItemTotal(e.target.value)}
-                                                placeholder="Auto-calculated or original"
-                                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-green-500 focus:border-green-500"
-                                            />
-                                            <p className="text-xs text-gray-500 mt-1">Auto-calculated if Qty & Price provided</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
+      // Steel subline S
+      if(isFinite(subSteel) && subSteel>0){
+        ALL.push({
+          invoice_number: invNum,
+          invoice_date: invDate,
+          supplier,
+          invoice_total: invTotal,
+          position: pos + 'S',
+          part_number: 'Steel - ' + it.part,
+          quantity: isFinite(steelKG)? fmt2(steelKG):'',
+          unit: 'KG',
+          unit_price: '',
+          line_total: fmt2(subSteel),
+          net_weight: '',
+          country_of_origin: coo
+        });
+      }
 
-                            {/* Action Buttons */}
-                            <div className="flex gap-4 mb-6 flex-wrap">
-                                <input
-                                    type="file"
-                                    ref={fileInputRef}
-                                    onChange={handleFileUpload}
-                                    accept=".xlsx,.xls"
-                                    className="hidden"
-                                />
-                                <button
-                                    onClick={() => fileInputRef.current?.click()}
-                                    className="flex items-center gap-2 px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-                                >
-                                    <Upload className="w-5 h-5" />
-                                    Upload Invoice File
-                                </button>
-                                
-                                <button
-                                    onClick={() => duplicateRow('aluminum')}
-                                    disabled={selectedRow === null || invoiceData.length === 0 || !dbLoaded}
-                                    className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
-                                >
-                                    <Copy className="w-5 h-5" />
-                                    Duplicate for Aluminum
-                                </button>
+      // Other subline A
+      if(isFinite(subOther) && subOther>0){
+        ALL.push({
+          invoice_number: invNum,
+          invoice_date: invDate,
+          supplier,
+          invoice_total: invTotal,
+          position: pos + 'A',
+          part_number: 'Other - ' + it.part,
+          quantity: isFinite(otherKG)? fmt2(otherKG):'',
+          unit: 'KG',
+          unit_price: '',
+          line_total: fmt2(subOther),
+          net_weight: '',
+          country_of_origin: coo
+        });
+      }
+    });
+  }
 
-                                <button
-                                    onClick={() => duplicateRow('steel')}
-                                    disabled={selectedRow === null || invoiceData.length === 0 || !dbLoaded}
-                                    className="flex items-center gap-2 px-6 py-3 bg-slate-600 text-white rounded-lg hover:bg-slate-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
-                                >
-                                    <Copy className="w-5 h-5" />
-                                    Duplicate for Steel
-                                </button>
+  // === UI Binding ===
+  function buildUI(){
+    UI.bar.style.display='flex';
 
-                                <button
-                                    onClick={downloadFile}
-                                    disabled={invoiceData.length === 0}
-                                    className="flex items-center gap-2 px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
-                                >
-                                    <Download className="w-5 h-5" />
-                                    Download Updated File
-                                </button>
-                            </div>
+    // sync header scroll
+    const header = UI.thead; const body = UI.tbody; let sync=false;
+    body.addEventListener('scroll',()=>{ if(sync) return; sync=true; header.scrollLeft = body.scrollLeft; sync=false; });
 
-                            {/* Stats */}
-                            <div className="grid grid-cols-3 gap-4 mb-6">
-                                <div className="bg-green-50 rounded-lg p-4">
-                                    <p className="text-sm text-gray-600">Total Rows</p>
-                                    <p className="text-2xl font-bold text-green-600">{invoiceData.length > 0 ? invoiceData.length : '-'}</p>
-                                </div>
-                                <div className="bg-emerald-50 rounded-lg p-4">
-                                    <p className="text-sm text-gray-600">Selected Row</p>
-                                    <p className="text-2xl font-bold text-emerald-600">{selectedRow !== null ? selectedRow + 1 : '-'}</p>
-                                </div>
-                                <div className="bg-teal-50 rounded-lg p-4">
-                                    <p className="text-sm text-gray-600">Grass DB Parts</p>
-                                    <p className="text-2xl font-bold text-teal-600">{dbLoaded ? grassDbData.length : 'Loading...'}</p>
-                                </div>
-                            </div>
-                        </div>
+    // Invoices dropdown
+    UI.invSel.innerHTML = '<option value="">Select an invoice…</option>';
+    const meta = {};
+    ALL.forEach(r=>{ if(!meta[r.invoice_number]) meta[r.invoice_number] = {date:r.invoice_date,supplier:r.supplier,total:r.invoice_total,count:0}; meta[r.invoice_number].count++; });
+    ORDER.forEach(id=>{
+      const m = meta[id]||{date:'',supplier:'',total:'',count:0};
+      const opt = document.createElement('option');
+      opt.value = id; opt.textContent = `Invoice ${id} — ${m.count} items — ${m.date} — ${m.supplier} — $${Number(m.total||0).toFixed(2)}`;
+      UI.invSel.appendChild(opt);
+    });
 
-                        {/* Data Table */}
-                        {invoiceData.length > 0 && (
-                            <div className="bg-white rounded-xl shadow-lg overflow-hidden">
-                                <div className="overflow-x-auto">
-                                    <table className="w-full">
-                                        <thead className="bg-gray-50 border-b border-gray-200">
-                                            <tr>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Line #</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Invoice #</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Supplier Part #</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Description</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Quantity</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Unit Price</th>
-                                                <th className="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Item Total</th>
-                                                <th className="px-4 py-3 text-center text-xs font-semibold text-gray-600 uppercase tracking-wider">Actions</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-gray-200">
-                                            {invoiceData.map((row, index) => (
-                                                <tr
-                                                    key={index}
-                                                    onClick={() => {
-                                                        setSelectedRow(index);
-                                                        if (lastSelectedRow !== index) {
-                                                            setDuplicateCount(0);
-                                                            setLastSelectedRow(index);
-                                                        }
-                                                    }}
-                                                    className={`transition-colors cursor-pointer ${
-                                                        selectedRow === index
-                                                            ? 'bg-green-100'
-                                                            : row._isDuplicate 
-                                                            ? 'bg-emerald-50 hover:bg-emerald-100'
-                                                            : 'hover:bg-gray-50'
-                                                    }`}
-                                                >
-                                                    <td className="px-4 py-3 text-sm font-medium text-gray-900">
-                                                        {index + 1}
-                                                        {row._isDuplicate && (
-                                                            <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-600 text-white">
-                                                                DUP
-                                                            </span>
-                                                        )}
-                                                    </td>
-                                                    <td className="px-4 py-3 text-sm text-gray-700">{row.InvoiceNumber}</td>
-                                                    <td className="px-4 py-3 text-sm text-gray-900 font-medium">{row.SupplierPartNumber}</td>
-                                                    <td className="px-4 py-3 text-sm text-gray-700 max-w-xs truncate">{row.Description}</td>
-                                                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                                                        <input
-                                                            type="number"
-                                                            value={row.Quantity || ''}
-                                                            onChange={(e) => updateRowValue(index, 'Quantity', e.target.value)}
-                                                            className="w-24 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-green-500 focus:border-green-500"
-                                                        />
-                                                    </td>
-                                                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                                                        <input
-                                                            type="number"
-                                                            step="0.01"
-                                                            value={row.UnitPrice || ''}
-                                                            onChange={(e) => updateRowValue(index, 'UnitPrice', e.target.value)}
-                                                            className="w-28 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-green-500 focus:border-green-500"
-                                                        />
-                                                    </td>
-                                                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                                                        <input
-                                                            type="number"
-                                                            step="0.01"
-                                                            value={row.ItemTotal || ''}
-                                                            onChange={(e) => updateRowValue(index, 'ItemTotal', e.target.value)}
-                                                            className="w-28 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-2 focus:ring-green-500 focus:border-green-500 font-semibold"
-                                                        />
-                                                    </td>
-                                                    <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
-                                                        {row._isDuplicate ? (
-                                                            <button
-                                                                onClick={() => deleteRow(index)}
-                                                                className="inline-flex items-center justify-center px-3 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
-                                                                title="Delete this duplicated row"
-                                                            >
-                                                                <Trash className="w-4 h-4 mr-1" />
-                                                                Delete
-                                                            </button>
-                                                        ) : (
-                                                            <span className="text-xs text-gray-400">Original</span>
-                                                        )}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        )}
+    UI.invSel.onchange = ()=>{ CURRENT = UI.invSel.value; if(CURRENT){ renderInvoice(CURRENT); } };
+    UI.exportBtn.onclick = exportExcel;
+    UI.exportCiBtn.onclick = exportToCITemplate;
 
-                        {invoiceData.length === 0 && (
-                            <div className="bg-white rounded-xl shadow-lg p-12 text-center">
-                                <Upload className="w-16 h-16 text-gray-300 mx-auto mb-4" />
-                                <p className="text-gray-600 text-lg">
-                                    {!dbLoaded ? 'Loading Grass database...' : 'Upload an invoice file to get started'}
-                                </p>
-                            </div>
-                        )}
-                    </div>
-                </div>
-            );
-        }
+    // Auto load first invoice
+    CURRENT = ORDER[0]; UI.invSel.value = CURRENT; renderInvoice(CURRENT);
+  }
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<GrassTool />);
-    </script>
+  function renderInvoice(id){
+    const rows = ALL.filter(r=>r.invoice_number===id).slice();
+    rows.sort((a,b)=>{
+      const A = (String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+      const B = (String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+      const an = parseInt(A[1]||999999,10), bn = parseInt(B[1]||999999,10);
+      if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
+    });
+
+    const meta = rows[0]||{};
+    UI.supplierInp.value = meta.supplier||'';
+    UI.dateInp.value = meta.invoice_date||'';
+    UI.totalInp.value = meta.invoice_total||'';
+
+    UI.stInv.textContent = id;
+    UI.stItems.textContent = String(rows.length);
+    UI.stTotal.textContent = '$'+Number(meta.invoice_total||0).toFixed(2);
+
+    // Render table
+    UI.rows.innerHTML = '';
+    rows.forEach((r, idx)=>{
+      UI.rows.appendChild(renderRow(r, idx, rows));
+    });
+
+    UI.table.style.display='block'; UI.stats.style.display='grid';
+    recomputeStats();
+
+    // Editable header fields
+    UI.supplierInp.onchange = e=> updateHdr('supplier', e.target.value);
+    UI.dateInp.onchange = e=> updateHdr('invoice_date', e.target.value);
+    UI.totalInp.onchange = e=> { updateHdr('invoice_total', e.target.value); recomputeStats(); };
+  }
+
+  function renderRow(row, idx, rows){
+    const tr = document.createElement('tr');
+
+    function tdInput(val, key, readOnly=false){
+      const td = document.createElement('td');
+      const inp = document.createElement('input');
+      inp.value = val==null? '': String(val);
+      if(readOnly){ inp.className='readonly'; inp.readOnly=true; }
+      inp.onchange = ()=> updateCell(idx, key, inp.value);
+      td.appendChild(inp); return td;
+    }
+
+    const actions = document.createElement('td'); actions.className='actions';
+    const add = document.createElement('button'); add.className='btn add'; add.textContent='➕ Below'; add.onclick=()=> addBelow(idx);
+    const del = document.createElement('button'); del.className='btn del'; del.textContent='🗑️'; del.onclick=()=> removeRow(idx);
+    actions.appendChild(add); actions.appendChild(del);
+
+    tr.appendChild(tdInput(row.position,'position'));
+    tr.appendChild(tdInput(row.part_number,'part_number'));
+    tr.appendChild(tdInput(row.quantity,'quantity'));
+    tr.appendChild(tdInput(row.unit,'unit'));
+    tr.appendChild(tdInput(row.unit_price,'unit_price'));
+    tr.appendChild(tdInput(row.line_total,'line_total'));
+    tr.appendChild(tdInput(row.net_weight,'net_weight'));
+    tr.appendChild(tdInput(row.country_of_origin,'country_of_origin'));
+    tr.appendChild(actions);
+
+    return tr;
+  }
+
+  function updateCell(viewIdx, key, val){
+    const rows = ALL.filter(r=>r.invoice_number===CURRENT).slice();
+    rows.sort((a,b)=>{
+      const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+      const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+      const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
+      if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
+    });
+    const target = rows[viewIdx];
+    const idx = ALL.indexOf(target);
+    if(idx>=0){ ALL[idx][key]=val; renderInvoice(CURRENT); }
+  }
+
+  function addBelow(viewIdx){
+    const rows = ALL.filter(r=>r.invoice_number===CURRENT).slice();
+    rows.sort((a,b)=>{
+      const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+      const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+      const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
+      if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
+    });
+    const base = rows[viewIdx];
+    const insert = { invoice_number: CURRENT, invoice_date: base.invoice_date, supplier: base.supplier, invoice_total: base.invoice_total, position: nextLetterPos(base.position), part_number:'', quantity:'', unit:'', unit_price:'', line_total:'', net_weight:'', country_of_origin: base.country_of_origin };
+    const idx = ALL.indexOf(base);
+    ALL.splice(idx+1, 0, insert);
+    renderInvoice(CURRENT);
+  }
+
+  function removeRow(viewIdx){
+    const rows = ALL.filter(r=>r.invoice_number===CURRENT).slice();
+    rows.sort((a,b)=>{
+      const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+      const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+      const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
+      if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
+    });
+    const target = rows[viewIdx];
+    const idx = ALL.indexOf(target);
+    if(idx>=0){ ALL.splice(idx,1); renderInvoice(CURRENT); }
+  }
+
+  function updateHdr(field, val){ ALL.forEach(r=>{ if(r.invoice_number===CURRENT){ r[field]=val; }}); }
+
+  function recomputeStats(){
+    const rows = ALL.filter(r=>r.invoice_number===CURRENT);
+    const invTotal = parseNum(rows[0]?.invoice_total);
+    const sum = sumLines(rows);
+    UI.stTotal.textContent = '$'+(isFinite(invTotal)?invTotal.toFixed(2):'0.00');
+    UI.stSum.textContent = '$'+sum.toFixed(2);
+    const diff = (isFinite(invTotal)?invTotal:0) - sum;
+    UI.stDiff.textContent = '$'+diff.toFixed(2);
+  }
+
+  // === Export ===
+  function exportExcel(){
+    const wb = XLSX.utils.book_new();
+    const byInv = {};
+    ALL.forEach(r=>{ if(!byInv[r.invoice_number]) byInv[r.invoice_number] = []; byInv[r.invoice_number].push(r); });
+    Object.keys(byInv).forEach(id=>{
+      const rows = byInv[id].slice().sort((a,b)=>{
+        const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+        const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+        const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
+        if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
+      });
+      const head = [
+        ['Invoice', id],
+        ['Date', rows[0]?.invoice_date||''],
+        ['Supplier', rows[0]?.supplier||''],
+        ['Invoice Total', rows[0]?.invoice_total||''],
+        [],
+        ['Pos','Part Number','Quantity','Unit','Unit Price','Line Total','Net Weight (kg)','COO']
+      ];
+      const body = rows.map(r=>[
+        r.position||'', r.part_number||'', r.quantity||'', r.unit||'', r.unit_price||'', r.line_total||'', r.net_weight||'', r.country_of_origin||''
+      ]);
+      const ws = XLSX.utils.aoa_to_sheet([...head, ...body]);
+      XLSX.utils.book_append_sheet(wb, ws, ('INV_'+id).slice(0,31));
+    });
+    const out = XLSX.write(wb, {type:'array', bookType:'xlsx'});
+    const blob = new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = (filename? filename + '_' : '') + 'grass_parsed.xlsx';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  }
+
+  // Export in Descartes CI template mapping (lean mapping; extend as needed)
+  function exportToCITemplate(){
+    if(!ALL.length){ showAlert('No data to export', false); return; }
+
+    const headers = [
+      'InvoiceNumber','InvoiceDate','InvoiceTotal','SupplierMID','SupplierName',
+      'BuyerPartNumber','SupplierPartNumber','Quantity','UnitOfMeasure','Description',
+      'UnitPrice','ItemTotal','CurrencyCode','ExchangeRate','CountryOfOrigin',
+      'CountryOfExport','DateOfExport','PortOfLading','RelatedParty','PO_Number',
+      'PO_Date','GrossWeight','GrossWeightUnit','NetWeight','TariffNumber',
+      'TariffDescription','Quantity1','UnitOfMeasure1','Quantity2','UnitOfMeasure2',
+      'Quantity3','UnitOfMeasure3','PrimarySPI','SecondarySPI','DeliverTo',
+      'SoldTo','SecondaryTariffNumber'
+    ];
+
+    const wb = XLSX.utils.book_new();
+    const byInv = {};
+    ALL.forEach(r=>{ if(!byInv[r.invoice_number]) byInv[r.invoice_number]=[]; byInv[r.invoice_number].push(r); });
+
+    Object.keys(byInv).forEach(id=>{
+      const rows = byInv[id].slice().sort((a,b)=>{
+        const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+        const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+        const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
+        if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
+      });
+
+      const aoa = [headers.slice()];
+      rows.forEach(item=>{
+        const row = new Array(headers.length).fill('');
+        row[0]  = item.invoice_number || '';
+        row[1]  = item.invoice_date || '';
+        row[2]  = parseNum(item.invoice_total)||'';
+        row[3]  = ''; // SupplierMID (blank)
+        row[4]  = item.supplier || '';
+        row[5]  = ''; // BuyerPartNumber
+        row[6]  = item.part_number || ''; // SupplierPartNumber
+        row[7]  = parseNum(item.quantity)||'';
+        row[8]  = item.unit || '';
+        row[9]  = ''; // Description
+        row[10] = parseNum(item.unit_price)||'';
+        row[11] = parseNum(item.line_total)||'';
+        row[12] = 'USD';
+        row[13] = ''; // ExchangeRate
+        row[14] = item.country_of_origin || '';
+        // optional fields left blank unless specified
+        row[23] = parseNum(item.net_weight)||''; // NetWeight
+        aoa.push(row);
+      });
+
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      XLSX.utils.book_append_sheet(wb, ws, ('INV_'+id).slice(0,31));
+    });
+
+    const out = XLSX.write(wb, {type:'array', bookType:'xlsx'});
+    const blob = new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = (filename? filename + '_' : '') + 'CI_template.xlsx';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+    showAlert('Exported CI template workbook', true);
+  }
+</script>
 </body>
 </html>
