@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Grass Invoice PDF Parser — Steel/Other Sublines (Final-match logic)</title>
+  <title>Grass Invoice PDF Parser — Steel/Other (final-match, next-part fence)</title>
   <!-- Libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
@@ -53,7 +53,7 @@
   <div class="wrap">
     <div class="header">
       <h1>Grass Invoice PDF Parser (Steel/Other sublines)</h1>
-      <p>Anchors by part number, fences to the next part, and uses the <b>last</b> steel/other values in the region.</p>
+      <p>Anchors by part number, fences to the <b>next part</b>, uses the <b>last</b> steel/other values in the region.</p>
     </div>
 
     <div class="upload" id="upload">
@@ -129,7 +129,6 @@
   function showAlert(msg, ok=true){ UI.alert.className = 'alert ' + (ok?'ok':'err'); UI.alert.textContent = msg; UI.alert.style.display='block'; setTimeout(()=> UI.alert.style.display='none', 3200); }
   function parseNum(s){
     if(s==null) return NaN; const t=String(s).trim(); if(!t) return NaN;
-    // 1.234,56 or 1,234.56 or 1234,56 or 1234.56
     if(/\d+[.,]\d{3}[.,]\d{2}$/.test(t)){ const last = t.lastIndexOf('.')>t.lastIndexOf(',')?'.':','; const intPart=t.slice(0,t.lastIndexOf(last)).replace(/[.,\s]/g,''); const dec=t.slice(t.lastIndexOf(last)+1); return parseFloat(intPart+'.'+dec); }
     if(/,\d{2}$/.test(t) && !/\.\d{2}$/.test(t)) return parseFloat(t.replace(/\./g,'').replace(',','.'));
     return parseFloat(t.replace(/,/g,''));
@@ -173,7 +172,7 @@
     ALL.length = 0; ORDER.length = 0;
     const big = String(text||'');
 
-    // Invoice number/date/total
+    // Invoice meta
     const invm = [...big.matchAll(/Invoice\s+(\d{5,})/gi)];
     const invNum = invm.length? invm[0][1] : 'UNKNOWN';
     if(!ORDER.includes(invNum)) ORDER.push(invNum);
@@ -186,7 +185,7 @@
 
     let invTotal = ''; const tm = big.match(/Total\s+Amount\s+([\d.,]+)\s+USD/i); if(tm) invTotal = String(parseNum(tm[1])||'');
 
-    // Base items (part, qty, unit, price/100 or /1000, line total)
+    // Base items
     const itemRegex = /\b(F[0-9]{9,})\s+(\d+[\d.,]*)\s+(PCS|PC|SET|PAIRS?)\s+([\d.,]+)\s*\/\s*(\d+)\s+([\d.,]+)\s+USD/gi;
     const items = []; let m;
     while((m = itemRegex.exec(big)) !== null){
@@ -198,18 +197,17 @@
       return;
     }
 
-    // For each base item, build a fenced region and take the LAST steel/other values inside that region
     items.forEach((it, i)=>{
-      // slab fence by next item
+      // Fence slab by next item
       const start = it.idx;
-      const end = (i < items.length-1 ? items[i+1].idx : start + 6000);
+      const end = (i < items.length-1 ? items[i+1].idx : start + 10000); // large cap to ensure we catch trailing steel blocks
       const slab = big.slice(start, end);
 
       // COO & net weight
       let coo = ''; const cooM = slab.match(/Country\s+of\s+Origin:\s*([A-Z]{2})/i); if(cooM) coo = cooM[1].toUpperCase();
       let netkg = ''; const wM = slab.match(/Net\s+weight\s+in\s+kg:\s*([\d.,]+)/i); if(wM) netkg = fmt2(parseNum(wM[1]));
 
-      // Anchor region by this exact part and fence to next part token
+      // Anchor region by this exact part and fence to next part token ONLY (no early stop tokens)
       const escPart = it.part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const partAnchor = new RegExp('\\b' + escPart + '\\b', 'i');
       const partIdx = slab.search(partAnchor);
@@ -218,28 +216,31 @@
 
       // Stop at next F######### if present; else hard cap
       const nextPartRel = afterPart.slice(10).search(/\bF[0-9]{9,}\b/);
-      const stopTokens = [' Order:', ' Delivery Note', ' Pos:', ' Customs tariff nr:', ' Country of Origin:'];
-      let fenceEndRel = nextPartRel > -1 ? (10 + nextPartRel) : Math.min(afterPart.length, 4000);
-      // also stop early if another section header appears
-      for(const tok of stopTokens){
-        const p = afterPart.indexOf(tok);
-        if(p > -1) fenceEndRel = Math.min(fenceEndRel, p);
-      }
+      const fenceEndRel = nextPartRel > -1 ? (10 + nextPartRel) : Math.min(afterPart.length, 8000);
       const region = afterPart.slice(0, fenceEndRel);
 
       // === LAST-match logic inside the fenced region ===
       let steelKG=NaN, steelVal=NaN, otherKG=NaN, otherVal=NaN;
 
-      const sKGs = [...region.matchAll(/Net\s+weight\s+in\s+kg\s+in\s+steel:\s*([\d.,]+)/gi)];
-      const oKGs = [...region.matchAll(/Net\s+weight\s+in\s+kg\s+in\s+other:\s*([\d.,]+)/gi)];
-      const sVals = [...region.matchAll(/Steel\s+value:\s*([\d.,]+)/gi)];
-      const oVals = [...region.matchAll(/Other\s+value:\s*([\d.,]+)/gi)];
+      const sKGs  = [...region.matchAll(/Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)/gi)];
+      const oKGs  = [...region.matchAll(/Net\s*weight\s*in\s*kg\s*in\s*other\s*:\s*([\d.,]+)/gi)];
+      const sVals = [...region.matchAll(/Steel\s*value\s*:\s*([\d.,]+)/gi)];
+      const oVals = [...region.matchAll(/Other\s*value\s*:\s*([\d.,]+)/gi)];
 
       if(sKGs.length) steelKG = parseNum(sKGs[sKGs.length-1][1]);
       if(oKGs.length) otherKG = parseNum(oKGs[oKGs.length-1][1]);
-
       if(sVals.length) steelVal = parseNum(sVals[sVals.length-1][1]);
       if(oVals.length) otherVal = parseNum(oVals[oVals.length-1][1]);
+
+      // Fallback widen if still missing steel/other values: look in entire slab after part
+      if(!isFinite(steelVal) || !isFinite(otherVal)){
+        const sAll = [...afterPart.matchAll(/Steel\s*value\s*:\s*([\d.,]+)/gi)];
+        const oAll = [...afterPart.matchAll(/Other\s*value\s*:\s*([\d.,]+)/gi)];
+        if(!isFinite(steelVal) && sAll.length) steelVal = parseNum(sAll[sAll.length-1][1]);
+        if(!isFinite(otherVal) && oAll.length) otherVal = parseNum(oAll[oAll.length-1][1]);
+      }
+
+      console.debug('PART', it.part, 'steelVal=', steelVal, 'otherVal=', otherVal, 'regionLen=', region.length);
 
       // Unit price in selling unit
       const unitPrice = (isFinite(it.unitPricePer) && isFinite(it.perDivisor) && it.perDivisor>0) ? (it.unitPricePer / it.perDivisor) : '';
@@ -304,7 +305,6 @@
 
     CURRENT = ORDER[0]; UI.invSel.value = CURRENT; renderInvoice(CURRENT);
 
-    // tab order for header
     UI.invSel.tabIndex = 1; UI.supplierInp.tabIndex = 2; UI.dateInp.tabIndex = 3; UI.totalInp.tabIndex = 4;
   }
 
