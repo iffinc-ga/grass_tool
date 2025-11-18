@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Grass Invoice PDF Parser — Steel sublines only</title>
+  <title>Grass Invoice PDF Parser — Steel sublines only (improved)</title>
   <!-- Libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
@@ -53,7 +53,7 @@
   <div class="wrap">
     <div class="header">
       <h1>Grass Invoice PDF Parser (Steel sublines only)</h1>
-      <p>Anchors by part number, fences to the <b>next part</b>, and uses the <b>last steel block</b> in the region plus a global fallback.</p>
+      <p>Steel value is matched to each line; steel weight defaults to that line’s net weight in kg.</p>
     </div>
 
     <div class="upload" id="upload">
@@ -137,12 +137,14 @@
     if(s==null) return NaN;
     const t=String(s).trim();
     if(!t) return NaN;
+    // 1.234,56 or 1,234.56 style
     if(/\d+[.,]\d{3}[.,]\d{2}$/.test(t)){
       const last = t.lastIndexOf('.')>t.lastIndexOf(',')?'.':',';
       const intPart=t.slice(0,t.lastIndexOf(last)).replace(/[.,\s]/g,'');
       const dec=t.slice(t.lastIndexOf(last)+1);
       return parseFloat(intPart+'.'+dec);
     }
+    // 1.234 or 1,23 style
     if(/,\d{2}$/.test(t) && !/\.\d{2}$/.test(t)) return parseFloat(t.replace(/\./g,'').replace(',','.'));
     return parseFloat(t.replace(/,/g,''));
   }
@@ -215,7 +217,7 @@
     ORDER.length = 0;
     const big = String(text||'');
 
-    // --- Global steel blocks for fallback mapping (we ignore "other" now) ---
+    // --- Global steel blocks for fallback mapping (we only rely on steelVal from here) ---
     const steelBlocks = [];
     const blockRegex = /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)[\s\S]*?Steel\s*value\s*:\s*([\d.,]+)/gi;
     let mb;
@@ -228,7 +230,7 @@
       });
     }
 
-    // Invoice meta (still assuming single invoice per file)
+    // Invoice meta (assuming one invoice per PDF)
     const invm = [...big.matchAll(/Invoice\s+(\d{5,})/gi)];
     const invNum = invm.length? invm[0][1] : 'UNKNOWN';
     if(!ORDER.includes(invNum)) ORDER.push(invNum);
@@ -275,15 +277,20 @@
       const end = (i < items.length-1 ? items[i+1].idx : start + 10000);
       const slab = big.slice(start, end);
 
-      // COO & net weight
+      // COO & base net weight
       let coo = '';
       const cooM = slab.match(/Country\s+of\s+Origin:\s*([A-Z]{2})/i);
       if(cooM) coo = cooM[1].toUpperCase();
 
-      let netkg = '';
+      let netkgStr = '';
+      let netkgNum = NaN;
       const wM = slab.match(/Net\s+weight\s+in\s+kg:\s*([\d.,]+)/i);
-      if(wM) netkg = fmt2(parseNum(wM[1]));
+      if(wM){
+        netkgNum = parseNum(wM[1]);
+        netkgStr = fmt2(netkgNum);
+      }
 
+      // Region around part up to next part
       const escPart = it.part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const partAnchor = new RegExp('\\b' + escPart + '\\b', 'i');
       const partIdx = slab.search(partAnchor);
@@ -294,21 +301,48 @@
       const fenceEndRel = nextPartRel > -1 ? (10 + nextPartRel) : Math.min(afterPart.length, 8000);
       const region = afterPart.slice(0, fenceEndRel);
 
-      let steelKG=NaN, steelVal=NaN;
+      // --- Steel value selection: prefer one that matches this line total ---
+      let steelVal = NaN;
 
-      const sKGs  = [...region.matchAll(/Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)/gi)];
-      const sVals = [...region.matchAll(/Steel\s*value\s*:\s*([\d.,]+)/gi)];
-
-      if(sKGs.length) steelKG = parseNum(sKGs[sKGs.length-1][1]);
-      if(sVals.length) steelVal = parseNum(sVals[sVals.length-1][1]);
-
-      // Fallback widen in slab
-      if(!isFinite(steelVal)){
-        const sAll = [...afterPart.matchAll(/Steel\s*value\s*:\s*([\d.,]+)/gi)];
-        if(!isFinite(steelVal) && sAll.length) steelVal = parseNum(sAll[sAll.length-1][1]);
+      const sValsMatches = [...region.matchAll(/Steel\s*value\s*:\s*([\d.,]+)/gi)];
+      if(sValsMatches.length){
+        const lineTotal = it.lineTotal;
+        if(isFinite(lineTotal)){
+          // Try to find a Steel value that matches this line total
+          let bestIdx = -1;
+          let bestDiff = Infinity;
+          for(let j=0;j<sValsMatches.length;j++){
+            const v = parseNum(sValsMatches[j][1]);
+            const diff = Math.abs(v - lineTotal);
+            if(diff < 0.02 && diff < bestDiff){ // ~2 cents tolerance
+              bestDiff = diff;
+              bestIdx = j;
+            }
+          }
+          if(bestIdx >= 0){
+            steelVal = parseNum(sValsMatches[bestIdx][1]);
+          } else if(sValsMatches.length === 1){
+            // If there's exactly one steel value in this region, use it
+            steelVal = parseNum(sValsMatches[0][1]);
+          } else {
+            // Fall back to last if multiple and no good match
+            steelVal = parseNum(sValsMatches[sValsMatches.length-1][1]);
+          }
+        } else {
+          // No line total, just use last in region
+          steelVal = parseNum(sValsMatches[sValsMatches.length-1][1]);
+        }
       }
 
-      // Global fallback: nearest unused steelBlock when still missing steel value
+      // Fallback widen in slab if still missing steelVal
+      if(!isFinite(steelVal)){
+        const sAll = [...afterPart.matchAll(/Steel\s*value\s*:\s*([\d.,]+)/gi)];
+        if(sAll.length){
+          steelVal = parseNum(sAll[sAll.length-1][1]);
+        }
+      }
+
+      // Global fallback: nearest unused steelBlock (steelVal only; we get weight from netkg)
       if(!isFinite(steelVal) && steelBlocks.length){
         const center = it.idx;
         let best = null, bestDist = Infinity, bestIdx = -1;
@@ -322,28 +356,28 @@
           }
         });
         if(best){
-          if(!isFinite(steelKG) && isFinite(best.steelKG)) steelKG = best.steelKG;
-          if(!isFinite(steelVal) && isFinite(best.steelVal)) steelVal = best.steelVal;
+          steelVal = best.steelVal;
           steelBlocks[bestIdx].used = true;
         }
       }
 
-      console.debug('PART', it.part, 'steelVal=', steelVal);
+      const steelValNum = steelVal;
+      // Steel weight: default to this line's net weight
+      let steelKG = isFinite(netkgNum) ? netkgNum : NaN;
+
+      console.debug('PART', it.part, 'lineTotal=', it.lineTotal, 'steelVal=', steelValNum, 'steelKG=', steelKG);
+
+      // Base line total: subtract only steel value (no "other")
+      let baseTotal = it.lineTotal;
+      if(isFinite(baseTotal) && isFinite(steelValNum)){
+        baseTotal = Math.max(0, baseTotal - steelValNum);
+      }
+      const base_total_raw = isFinite(baseTotal) ? fmt2(baseTotal) : '';
 
       const unitPrice = (isFinite(it.unitPricePer) && isFinite(it.perDivisor) && it.perDivisor>0)
         ? (it.unitPricePer / it.perDivisor) : '';
 
       const pos = (i+1).toString();
-
-      let baseTotal = it.lineTotal;
-      const subSteel = isFinite(steelVal)? steelVal : 0;
-
-      if(isFinite(baseTotal)){
-        // Only subtract steel from main line now
-        baseTotal = Math.max(0, baseTotal - subSteel);
-      }
-
-      const base_total_raw = isFinite(baseTotal) ? fmt2(baseTotal) : '';
 
       // Base line
       ALL.push({
@@ -357,14 +391,15 @@
         unit: it.unit,
         unit_price: isFinite(unitPrice) ? fmt2(unitPrice) : '',
         line_total: base_total_raw,
-        net_weight: netkg,
+        net_weight: netkgStr,
         country_of_origin: coo,
         origin: 'auto_base',
         base_total_raw: base_total_raw
       });
 
-      // Steel subline (auto)
-      if(isFinite(subSteel) && subSteel>0){
+      // Steel subline (auto) if we have a steel value
+      if(isFinite(steelValNum) && steelValNum>0){
+        const steelQtyStr = isFinite(steelKG) ? fmt2(steelKG) : '';
         ALL.push({
           invoice_number: invNum,
           invoice_date: invDate,
@@ -372,17 +407,16 @@
           invoice_total: invTotal,
           position: pos + 'S',
           part_number: 'Steel - ' + it.part,
-          quantity: isFinite(steelKG)? fmt2(steelKG):'',
+          quantity: steelQtyStr,
           unit:'KG',
           unit_price:'',
-          line_total: fmt2(subSteel),
+          line_total: fmt2(steelValNum),
           net_weight:'',
           country_of_origin: coo,
           origin: 'auto_sub',
           base_total_raw: ''
         });
       }
-      // NOTE: No "Other" subline anymore.
     });
   }
 
