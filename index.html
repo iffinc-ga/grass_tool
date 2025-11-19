@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Grass Invoice PDF Parser — Steel-only + Undo</title>
+  <title>Grass Invoice PDF Parser — Steel-only + Undo + HTS Export</title>
   <!-- Libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
@@ -65,8 +65,8 @@
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Grass Invoice PDF Parser (Steel-only + Undo)</h1>
-      <p>Only steel sublines are kept. Base line total = original invoice total − sum of steel sublines.</p>
+      <h1>Grass Invoice PDF Parser (Steel-only + Undo + HTS)</h1>
+      <p>Steel sublines + Descartes export with HTS mapped from updated_grass_db.xlsx.</p>
     </div>
 
     <!-- DB banner -->
@@ -149,7 +149,11 @@
   };
 
   let ALL = [], ORDER = [], CURRENT = '', filename = '';
-  let grassDb = []; // populated from updated_grass_db.xlsx when available
+  let grassDb = [];          // raw DB rows
+  let grassDbIndex = null;   // normalized part -> row
+  let grassDbNormRows = [];  // [{norm, row}]
+  let grassDbCols = { partKey:null, tariffKey:null, descKey:null, uomKey:null, supplierMidKey:null };
+
   let undoStack = [];
 
   // ======= DB loader for updated_grass_db.xlsx =======
@@ -194,10 +198,14 @@
       workbook.SheetNames.find(n => n.toLowerCase().includes('grass')) ||
       workbook.SheetNames[0];
     grassDb = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {defval:''});
+    buildGrassDbIndex();
   }
 
   function enterOfflineMode(reason){
     grassDb = grassDb || [];
+    grassDbIndex = null;
+    grassDbNormRows = [];
+    grassDbCols = { partKey:null, tariffKey:null, descKey:null, uomKey:null, supplierMidKey:null };
     setDbBanner('offline','DB: offline', reason || 'Proceeding without DB enrichment.');
   }
 
@@ -232,6 +240,66 @@
   offlineDbBtn?.addEventListener('click', ()=> enterOfflineMode('Offline mode selected by user.'));
   window.addEventListener('DOMContentLoaded', ()=>{ loadDatabaseFromGitHub().catch(()=>{}); });
 
+  // ======= DB index & lookup helpers =======
+  function normalizePart(s){
+    if(!s) return '';
+    return String(s)
+      .replace(/^Steel\s*-\s*/i,'')   // strip Steel - prefix
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g,'');      // remove spaces, dots, dashes, etc.
+  }
+
+  function buildGrassDbIndex(){
+    grassDbIndex = {};
+    grassDbNormRows = [];
+    grassDbCols = { partKey:null, tariffKey:null, descKey:null, uomKey:null, supplierMidKey:null };
+
+    if(!grassDb || !grassDb.length) return;
+    const sample = grassDb[0];
+    const keys = Object.keys(sample);
+
+    function findKey(regexes){
+      return keys.find(k => regexes.some(r => r.test(k))) || null;
+    }
+
+    grassDbCols.partKey        = findKey([/part/i, /article/i, /item/i]);
+    grassDbCols.tariffKey      = findKey([/hts/i, /tariff/i]);
+    grassDbCols.descKey        = findKey([/desc/i]);
+    grassDbCols.uomKey         = findKey([/uom/i, /unit/i]);
+    grassDbCols.supplierMidKey = findKey([/mid/i]);
+
+    grassDb.forEach(row=>{
+      const rawPart = grassDbCols.partKey ? row[grassDbCols.partKey] : '';
+      const norm    = normalizePart(rawPart);
+      if(!norm) return;
+      grassDbIndex[norm] = row;
+      grassDbNormRows.push({ norm, row });
+    });
+  }
+
+  function getDbInfoForPart(partStr){
+    if(!grassDbIndex || !grassDbNormRows.length) return null;
+    const norm = normalizePart(partStr);
+    if(!norm) return null;
+
+    // exact first
+    if(grassDbIndex[norm]) return grassDbIndex[norm];
+
+    // fallback: longest partial match
+    let best = null;
+    let bestLen = 0;
+    grassDbNormRows.forEach(({norm:dbNorm,row})=>{
+      if(!dbNorm) return;
+      if(norm.includes(dbNorm) || dbNorm.includes(norm)){
+        if(dbNorm.length > bestLen){
+          bestLen = dbNorm.length;
+          best = row;
+        }
+      }
+    });
+    return best;
+  }
+
   // ======= Utility helpers =======
   function showAlert(msg, ok=true){
     UI.alert.className = 'alert ' + (ok?'ok':'err');
@@ -264,7 +332,6 @@
 
   // Undo stack
   function pushUndo(){
-    // Deep copy ALL; limit history to last 50 steps
     undoStack.push(JSON.parse(JSON.stringify(ALL)));
     if(undoStack.length > 50) undoStack.shift();
   }
@@ -355,13 +422,12 @@
     }
   }
 
-  // ======= Core Grass parsing (steel blocks matched by net weight + value) =======
+  // ======= Core Grass parsing (same as last version, with steel clamp) =======
   function parseGrass(text){
     ALL.length = 0;
     ORDER.length = 0;
     const big = String(text||'');
 
-    // Invoice meta (assume single consolidated invoice number)
     const invm = [...big.matchAll(/Invoice\s+(\d{5,})/gi)];
     const invNum = invm.length? invm[0][1] : 'UNKNOWN';
     if(!ORDER.includes(invNum)) ORDER.push(invNum);
@@ -378,7 +444,6 @@
     const tm = big.match(/Total\s+Amount\s+([\d.,]+)\s+USD/i);
     if(tm) invTotal = String(parseNum(tm[1])||'');
 
-    // 1) Find all base items
     const itemRegex =
       /\b(F[0-9]{9,})\s+(\d+[\d.,]*)\s+(PCS|PC|SET|PAIRS?)\s+([\d.,]+)\s*\/\s*(\d+)\s+([\d.,]+)\s+USD/gi;
     const items = [];
@@ -395,7 +460,6 @@
       });
     }
 
-    // 2) Precompute base meta: net weight, COO
     const meta = items.map(()=>({ baseNetkg: NaN, netkgStr:'', coo:'' }));
     items.forEach((it, i)=>{
       const start = it.idx;
@@ -416,7 +480,6 @@
       }
     });
 
-    // 3) Collect steel/other blocks and assign to items by net + value
     const steelInfo = items.map(()=>({ steelKG:NaN, steelVal:NaN }));
     const usedBlockIdx = new Set();
 
@@ -431,7 +494,6 @@
 
       const blockNet = (isFinite(steelKG)?steelKG:0) + (isFinite(otherKG)?otherKG:0);
       const blockVal = (isFinite(steelVal)?steelVal:0) + (isFinite(otherVal)?otherVal:0);
-
       if(!isFinite(blockNet) || !isFinite(blockVal)) continue;
 
       let bestIdx = -1;
@@ -447,11 +509,10 @@
         const netRel = netDiff / Math.max(Math.abs(baseNet), Math.abs(blockNet), 1);
         const valRel = valDiff / Math.max(Math.abs(baseVal), Math.abs(blockVal), 1);
 
-        // require both net and value to be reasonably close (1% tolerance)
         if(netRel > 0.01 || valRel > 0.01) return;
 
         const dist = Math.abs(blockIdx - it.idx);
-        const score = netRel + valRel + dist / 1000000; // tiny tie-breaker on distance
+        const score = netRel + valRel + dist / 1000000;
         if(score < bestScore){
           bestScore = score;
           bestIdx = i;
@@ -470,13 +531,11 @@
       }
     }
 
-    // 4) Fallback for "steel only" blocks without explicit "other" (avoid ones we already used)
     const steelOnlyRegex =
       /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)[\s\S]{0,120}?Steel\s*value\s*:\s*([\d.,]+)/gi;
     let so;
     while((so = steelOnlyRegex.exec(big)) !== null){
       const idx = so.index;
-      // skip if this start is already part of an assigned full block
       if(usedBlockIdx.has(idx)) continue;
 
       const steelKG = parseNum(so[1]);
@@ -490,10 +549,10 @@
       items.forEach((it, i)=>{
         const baseNet = meta[i].baseNetkg;
         if(!isFinite(baseNet)) return;
-        if(idx <= it.idx) return; // should follow the item
+        if(idx <= it.idx) return;
 
         const netRel = Math.abs(baseNet - steelKG) / Math.max(Math.abs(baseNet), Math.abs(steelKG), 1);
-        if(netRel > 0.6) return; // only accept somewhat similar weights
+        if(netRel > 0.6) return;
 
         const dist = idx - it.idx;
         if(netRel < bestRel - 1e-9 || (Math.abs(netRel - bestRel) < 1e-9 && dist < bestDist)){
@@ -514,7 +573,6 @@
       }
     }
 
-    // 5) If no items, still push a placeholder for the invoice
     if(!items.length){
       ALL.push({
         invoice_number:invNum, invoice_date:invDate, supplier, invoice_total:invTotal,
@@ -524,7 +582,6 @@
       return;
     }
 
-    // 6) Build ALL rows (base + steel S-lines, clamped so steelVal ≤ original line total)
     items.forEach((it, i)=>{
       const pos = (i+1).toString();
       const baseNetkg = meta[i].baseNetkg;
@@ -539,7 +596,6 @@
 
       const origLineTotal = isFinite(baseVal) ? fmt2(baseVal) : '';
 
-      // Base line
       ALL.push({
         invoice_number: invNum,
         invoice_date:  invDate,
@@ -556,13 +612,11 @@
         country_of_origin: coo
       });
 
-      // Steel S-line if we have a value
       let sInfo = steelInfo[i];
       let sVal  = sInfo.steelVal;
       let sKG   = sInfo.steelKG;
 
       if(isFinite(sVal) && sVal > 0){
-        // Clamp so steel value never exceeds original line total
         if(isFinite(baseVal) && baseVal > 0 && sVal > baseVal){
           const ratio = baseVal / sVal;
           sVal = baseVal;
@@ -805,7 +859,6 @@
     UI.stDiff.textContent  = '$'+diff.toFixed(2);
   }
 
-  // === Steel adjustment: base line total = original − sum(steel sublines) ===
   function applySteelAdjustments(invId){
     if(!invId) return;
     const rows = ALL.filter(r=>r.invoice_number===invId);
@@ -838,7 +891,7 @@
     });
   }
 
-  // ======= Descartes export (unchanged shape) =======
+  // ======= Descartes export with HTS from DB =======
   function exportToDescartes(){
     if(!ALL.length){
       showAlert('No data to export', false);
@@ -880,11 +933,40 @@
       const buyerPartNum = item.part_number || '';
       const supplierPartNum = item.part_number || '';
 
+      // ----- HTS / tariff enrichment from Grass DB -----
+      const db = getDbInfoForPart(item.part_number || '');
+      let tariffNum = '';
+      let tariffDesc = '';
+      let tariffUom  = '';
+      let supMid     = '';
+
+      if(db && grassDbCols.tariffKey){
+        tariffNum = db[grassDbCols.tariffKey] || '';
+      }
+      if(db && grassDbCols.descKey){
+        tariffDesc = db[grassDbCols.descKey] || '';
+      }
+      if(db && grassDbCols.uomKey){
+        tariffUom = db[grassDbCols.uomKey] || '';
+      }
+      if(db && grassDbCols.supplierMidKey){
+        supMid = db[grassDbCols.supplierMidKey] || '';
+      }
+
+      // Decide Quantity1 / UnitOfMeasure1
+      let q1 = item.quantity || '';
+      let u1 = item.unit || '';
+      const netW = roundWeight(item.net_weight);
+      if(tariffUom && /KG/i.test(String(tariffUom)) && netW){
+        q1 = netW;
+        u1 = 'KG';
+      }
+
       const row = {
         'InvoiceNumber': item.invoice_number || '',
         'InvoiceDate': item.invoice_date || '',
         'InvoiceTotal': item.invoice_total || '',
-        'SupplierMID': '',
+        'SupplierMID': supMid || '',
         'SupplierName': supplierForInvoice,
         'BuyerPartNumber': buyerPartNum,
         'SupplierPartNumber': supplierPartNum,
@@ -904,11 +986,11 @@
         'PO_Date': '',
         'GrossWeight': '',
         'GrossWeightUnit': '',
-        'NetWeight': roundWeight(item.net_weight),
-        'TariffNumber': '',
-        'TariffDescription': '',
-        'Quantity1': '',
-        'UnitOfMeasure1': '',
+        'NetWeight': netW,
+        'TariffNumber': tariffNum,
+        'TariffDescription': tariffDesc,
+        'Quantity1': q1,
+        'UnitOfMeasure1': u1,
         'Quantity2': '',
         'UnitOfMeasure2': '',
         'Quantity3': '',
