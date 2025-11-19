@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Grass Invoice PDF Parser — Complete Export</title>
+  <title>Grass Invoice PDF Parser — Steel-only + Undo</title>
   <!-- Libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
@@ -65,8 +65,8 @@
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Grass Invoice PDF Parser (Complete Export)</h1>
-      <p>Steel-only sublines with full Descartes template export including tariff lookups and supplier MID matching.</p>
+      <h1>Grass Invoice PDF Parser (Steel-only + Undo)</h1>
+      <p>Only steel sublines are kept. Base line total = original invoice total − sum of steel sublines.</p>
     </div>
 
     <!-- DB banner -->
@@ -149,7 +149,7 @@
   };
 
   let ALL = [], ORDER = [], CURRENT = '', filename = '';
-  let grassDb = []; // populated from GRASS_DB sheet
+  let grassDb = []; // populated from updated_grass_db.xlsx when available
   let htsCodesDb = []; // populated from hts_codes_with_uom sheet
   let steelAlumDb = []; // populated from Sheet1
   let supplierMidDb = []; // populated from MID sheet
@@ -193,57 +193,24 @@
     return XLSX.read(buf,{type:'array'});
   }
 
-  async function loadDatabaseFromGitHub(){
-    const remoteUrl = `https://raw.githubusercontent.com/${GITHUB_CONFIG.owner}/${GITHUB_CONFIG.repo}/${GITHUB_CONFIG.branch}/${GITHUB_CONFIG.filePath}`;
-    const localUrl  = './'+GITHUB_CONFIG.filePath;
-
-    setDbBanner('loading','Loading database...','Trying GitHub (8s timeout)…');
-    try{
-      const wb = await fetchAndReadWorkbook(remoteUrl, true);
-      await hydrateDbsFromWorkbook(wb);
-      setDbBanner('loaded', 'Database loaded ✓', `Loaded from GitHub at ${new Date().toLocaleString()}`);
-      return;
-    }catch(err1){
-      console.warn('[DB] GitHub load failed:', err1?.message || err1);
-      setDbBanner('loading','Retrying from local file…','Looking for ./updated_grass_db.xlsx');
-      try{
-        const wb2 = await fetchAndReadWorkbook(localUrl, false);
-        await hydrateDbsFromWorkbook(wb2);
-        setDbBanner('loaded','Database loaded ✓ (local fallback)', `Loaded from local file at ${new Date().toLocaleString()}`);
-        return;
-      }catch(err2){
-        console.warn('[DB] Local fallback failed:', err2?.message || err2);
-        enterOfflineMode(`DB load failed. Working offline. You can still parse/edit and export (limited enrichment).`);
-      }
-    }
-  }
-
-  async function hydrateDbsFromWorkbook(workbook){
+  async function hydrateDbFromWorkbook(workbook){
     // Load GRASS_DB sheet
-    if(workbook.SheetNames.includes('GRASS_DB')){
-      grassDb = XLSX.utils.sheet_to_json(workbook.Sheets['GRASS_DB']);
-      console.log(`[DB] Loaded GRASS_DB: ${grassDb.length} rows`);
-    } else {
-      console.warn('[DB] GRASS_DB sheet not found');
-      grassDb = [];
-    }
+    const grassSheetName =
+      workbook.SheetNames.find(n => n.toLowerCase().includes('grass')) ||
+      workbook.SheetNames[0];
+    grassDb = XLSX.utils.sheet_to_json(workbook.Sheets[grassSheetName], {defval:''});
+    console.log(`[DB] Loaded ${grassSheetName}: ${grassDb.length} rows`);
 
     // Load hts_codes_with_uom sheet
     if(workbook.SheetNames.includes('hts_codes_with_uom')){
       htsCodesDb = XLSX.utils.sheet_to_json(workbook.Sheets['hts_codes_with_uom']);
       console.log(`[DB] Loaded hts_codes_with_uom: ${htsCodesDb.length} rows`);
-    } else {
-      console.warn('[DB] hts_codes_with_uom sheet not found');
-      htsCodesDb = [];
     }
 
     // Load Sheet1 (steel/aluminum mappings)
     if(workbook.SheetNames.includes('Sheet1')){
       steelAlumDb = XLSX.utils.sheet_to_json(workbook.Sheets['Sheet1']);
-      console.log(`[DB] Loaded Sheet1 (steel/alum): ${steelAlumDb.length} rows`);
-    } else {
-      console.warn('[DB] Sheet1 not found');
-      steelAlumDb = [];
+      console.log(`[DB] Loaded Sheet1: ${steelAlumDb.length} rows`);
     }
 
     // Load MID sheet
@@ -251,10 +218,6 @@
       supplierMidDb = XLSX.utils.sheet_to_json(workbook.Sheets['MID'], {defval:''});
       buildSupplierMidIndex();
       console.log(`[DB] Loaded MID: ${supplierMidDb.length} rows`);
-    } else {
-      console.warn('[DB] MID sheet not found');
-      supplierMidDb = [];
-      supplierMidIndex = [];
     }
   }
 
@@ -264,15 +227,645 @@
     steelAlumDb = steelAlumDb || [];
     supplierMidDb = supplierMidDb || [];
     supplierMidIndex = supplierMidIndex || [];
-    setDbBanner('offline', 'Offline mode (DB skipped)', reason || 'You can continue without the DB.');
+    setDbBanner('offline','DB: offline', reason || 'Proceeding without DB enrichment.');
   }
 
-  retryDbBtn.addEventListener('click', ()=> loadDatabaseFromGitHub());
-  offlineDbBtn.addEventListener('click', ()=> enterOfflineMode('Switched to offline mode by user.'));
+  async function loadDatabaseFromGitHub(){
+    const {owner,repo,branch,filePath} = GITHUB_CONFIG;
+    const remoteUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filePath}`;
+    const localUrl  = './updated_grass_db.xlsx';
 
-  window.addEventListener('DOMContentLoaded', function() {
-    loadDatabaseFromGitHub();
+    setDbBanner('loading','DB: loading…','Trying GitHub (8s timeout)…');
+
+    try{
+      const wb = await fetchAndReadWorkbook(remoteUrl,true);
+      await hydrateDbFromWorkbook(wb);
+      setDbBanner('loaded','DB: loaded from GitHub', new Date().toLocaleString());
+      return;
+    }catch(err1){
+      console.warn('[DB] GitHub load failed', err1?.message || err1);
+      setDbBanner('loading','DB: retrying from local…','Looking for ./updated_grass_db.xlsx');
+      try{
+        const wb2 = await fetchAndReadWorkbook(localUrl,false);
+        await hydrateDbFromWorkbook(wb2);
+        setDbBanner('loaded','DB: loaded from local', new Date().toLocaleString());
+        return;
+      }catch(err2){
+        console.warn('[DB] Local db load failed', err2?.message || err2);
+        enterOfflineMode('DB could not be loaded from GitHub or local file.');
+      }
+    }
+  }
+
+  retryDbBtn?.addEventListener('click', ()=> loadDatabaseFromGitHub().catch(()=>{}));
+  offlineDbBtn?.addEventListener('click', ()=> enterOfflineMode('Offline mode selected by user.'));
+  window.addEventListener('DOMContentLoaded', ()=>{ loadDatabaseFromGitHub().catch(()=>{}); });
+
+  // ======= Utility helpers =======
+  function showAlert(msg, ok=true){
+    UI.alert.className = 'alert ' + (ok?'ok':'err');
+    UI.alert.textContent = msg;
+    UI.alert.style.display='block';
+    setTimeout(()=> UI.alert.style.display='none', 3200);
+  }
+
+  function parseNum(s){
+    if(s==null) return NaN;
+    const t=String(s).trim();
+    if(!t) return NaN;
+    if(/\d+[.,]\d{3}[.,]\d{2}$/.test(t)){
+      const last = t.lastIndexOf('.')>t.lastIndexOf(',')?'.':',';
+      const intPart=t.slice(0,t.lastIndexOf(last)).replace(/[.,\s]/g,'');
+      const dec=t.slice(t.lastIndexOf(last)+1);
+      return parseFloat(intPart+'.'+dec);
+    }
+    if(/,\d{2}$/.test(t) && !/\.\d{2}$/.test(t))
+      return parseFloat(t.replace(/\./g,'').replace(',','.'));
+    return parseFloat(t.replace(/,/g,''));
+  }
+
+  const fmt2  = n => (isFinite(+n)? (+n).toFixed(2):'');
+  const toUS  = d => {
+    const m=String(d||'').match(/(\d{2})\.(\d{2})\.(\d{4})/);
+    return m ? `${m[2]}/${m[1]}/${m[3]}` : (d||'');
+  };
+  const sumLines = list => list.reduce((a,r)=> a + (parseNum(r.line_total)||0), 0);
+
+  // Undo stack
+  function pushUndo(){
+    // Deep copy ALL; limit history to last 50 steps
+    undoStack.push(JSON.parse(JSON.stringify(ALL)));
+    if(undoStack.length > 50) undoStack.shift();
+  }
+
+  function undoLast(){
+    if(!undoStack.length){
+      showAlert('Nothing to undo', false);
+      return;
+    }
+    ALL = undoStack.pop() || [];
+    ORDER = Array.from(new Set(ALL.map(r=>r.invoice_number)));
+    if(!CURRENT || !ORDER.includes(CURRENT)) CURRENT = ORDER[0] || '';
+    if(!ORDER.length){
+      UI.table.style.display='none';
+      UI.stats.style.display='none';
+      return;
+    }
+    buildUI();
+  }
+
+  // ======= File handling =======
+  UI.drop.addEventListener('click', ()=> UI.file.click());
+  UI.file.addEventListener('change', e=>{
+    const f=e.target.files?.[0];
+    if(f) handleFile(f);
   });
+  UI.drop.addEventListener('dragover', e=>{
+    e.preventDefault();
+    UI.drop.style.background='#f1f5ff';
+  });
+  UI.drop.addEventListener('dragleave', ()=> UI.drop.style.background='');
+  UI.drop.addEventListener('drop', e=>{
+    e.preventDefault();
+    UI.drop.style.background='';
+    const f=e.dataTransfer.files?.[0];
+    if(f) handleFile(f);
+  });
+  UI.newBtn.addEventListener('click', ()=> location.reload());
+  UI.undoBtn.addEventListener('click', undoLast);
+
+  async function handleFile(file){
+    if(!/\.pdf$/i.test(file.name)){
+      showAlert('Please upload a PDF file', false);
+      return;
+    }
+    filename = file.name.replace(/\.pdf$/i,'');
+    UI.upload.style.display='none';
+    UI.loading.style.display='block';
+    undoStack = [];  // reset undo history
+
+    try{
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const pdf = await pdfjsLib.getDocument({data:buf}).promise;
+      let text = '';
+      for(let i=1;i<=pdf.numPages;i++){
+        try{
+          const page = await pdf.getPage(i);
+          const tc = await page.getTextContent({includeMarkedContent:true});
+          text += (tc.items||[]).map(it=> it?.str || '').join(' ') + "\n";
+        }catch(e){
+          console.warn('page read failed', i, e);
+        }
+      }
+      if(!text.trim()){
+        showAlert('PDF has no extractable text (maybe scanned). Try OCR.', false);
+        UI.upload.style.display='block';
+        return;
+      }
+      parseGrass(text);
+      ORDER.forEach(id => applySteelAdjustments(id));
+
+      if(ALL.length){
+        buildUI();
+        showAlert(
+          `Found ${new Set(ALL.map(x=>x.invoice_number)).size} invoice(s), ${ALL.length} row(s)`,
+          true
+        );
+      } else {
+        showAlert('No invoice rows were parsed. Try another file or adjust patterns.', false);
+        UI.upload.style.display='block';
+      }
+    }catch(err){
+      console.error(err);
+      showAlert('Error: '+(err.message||String(err)), false);
+      UI.upload.style.display='block';
+    } finally{
+      UI.loading.style.display='none';
+    }
+  }
+
+  // ======= Core Grass parsing (steel blocks matched by net weight + value) =======
+  function parseGrass(text){
+    ALL.length = 0;
+    ORDER.length = 0;
+    const big = String(text||'');
+
+    // Invoice meta (assume single consolidated invoice number)
+    const invm = [...big.matchAll(/Invoice\s+(\d{5,})/gi)];
+    const invNum = invm.length? invm[0][1] : 'UNKNOWN';
+    if(!ORDER.includes(invNum)) ORDER.push(invNum);
+
+    let invDate = '';
+    const dm = big.match(/Date:\s*(\d{2}\.\d{2}\.\d{4})/);
+    if(dm) invDate = toUS(dm[1]);
+
+    let supplier = 'GRASS GmbH';
+    if(/\bGRASS\s+GmbH\s+(Österreich|Osterreich)\b/i.test(big))
+      supplier = 'GRASS GmbH Österreich';
+
+    let invTotal = '';
+    const tm = big.match(/Total\s+Amount\s+([\d.,]+)\s+USD/i);
+    if(tm) invTotal = String(parseNum(tm[1])||'');
+
+    // 1) Find all base items
+    const itemRegex =
+      /\b(F[0-9]{9,})\s+(\d+[\d.,]*)\s+(PCS|PC|SET|PAIRS?)\s+([\d.,]+)\s*\/\s*(\d+)\s+([\d.,]+)\s+USD/gi;
+    const items = [];
+    let m;
+    while((m = itemRegex.exec(big)) !== null){
+      items.push({
+        idx: m.index,
+        part: m[1],
+        qty: parseNum(m[2]),
+        unit: m[3].toUpperCase(),
+        unitPricePer: parseNum(m[4]),
+        perDivisor: parseNum(m[5]),
+        lineTotal: parseNum(m[6])
+      });
+    }
+
+    // 2) Precompute base meta: net weight, COO
+    const meta = items.map(()=>({ baseNetkg: NaN, netkgStr:'', coo:'' }));
+    items.forEach((it, i)=>{
+      const start = it.idx;
+      const end   = (i < items.length-1 ? items[i+1].idx : big.length);
+      const slab  = big.slice(start, end);
+
+      const wM = slab.match(/Net\s*weight\s*in\s*kg:\s*([\d.,]+)/i);
+      if(wM){
+        const base = parseNum(wM[1]);
+        if(isFinite(base)){
+          meta[i].baseNetkg = base;
+          meta[i].netkgStr  = fmt2(base);
+        }
+      }
+      const cooM = slab.match(/Country\s+of\s+Origin:\s*([A-Z]{2})/i);
+      if(cooM){
+        meta[i].coo = cooM[1].toUpperCase();
+      }
+    });
+
+    // 3) Collect steel/other blocks and assign to items by net + value
+    const steelInfo = items.map(()=>({ steelKG:NaN, steelVal:NaN }));
+    const usedBlockIdx = new Set();
+
+    const blockRegex = /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)\s*Net\s*weight\s*in\s*kg\s*in\s*other\s*:\s*([\d.,]+)\s*Steel\s*value\s*:\s*([\d.,]+)\s*Other\s*value\s*:\s*([\d.,]+)/gi;
+    let mb;
+    while((mb = blockRegex.exec(big)) !== null){
+      const blockIdx = mb.index;
+      const steelKG = parseNum(mb[1]);
+      const otherKG = parseNum(mb[2]);
+      const steelVal = parseNum(mb[3]);
+      const otherVal = parseNum(mb[4]);
+
+      const blockNet = (isFinite(steelKG)?steelKG:0) + (isFinite(otherKG)?otherKG:0);
+      const blockVal = (isFinite(steelVal)?steelVal:0) + (isFinite(otherVal)?otherVal:0);
+
+      if(!isFinite(blockNet) || !isFinite(blockVal)) continue;
+
+      let bestIdx = -1;
+      let bestScore = Infinity;
+
+      items.forEach((it, i)=>{
+        const baseNet = meta[i].baseNetkg;
+        const baseVal = it.lineTotal;
+        if(!isFinite(baseNet) || !isFinite(baseVal)) return;
+
+        const netDiff = Math.abs(baseNet - blockNet);
+        const valDiff = Math.abs(baseVal - blockVal);
+        const netRel = netDiff / Math.max(Math.abs(baseNet), Math.abs(blockNet), 1);
+        const valRel = valDiff / Math.max(Math.abs(baseVal), Math.abs(blockVal), 1);
+
+        // require both net and value to be reasonably close (1% tolerance)
+        if(netRel > 0.01 || valRel > 0.01) return;
+
+        const dist = Math.abs(blockIdx - it.idx);
+        const score = netRel + valRel + dist / 1000000; // tiny tie-breaker on distance
+        if(score < bestScore){
+          bestScore = score;
+          bestIdx = i;
+        }
+      });
+
+      if(bestIdx >= 0){
+        usedBlockIdx.add(blockIdx);
+        const info = steelInfo[bestIdx];
+        if(isFinite(steelKG)){
+          info.steelKG = isFinite(info.steelKG) ? (info.steelKG + steelKG) : steelKG;
+        }
+        if(isFinite(steelVal)){
+          info.steelVal = isFinite(info.steelVal) ? (info.steelVal + steelVal) : steelVal;
+        }
+      }
+    }
+
+    // 4) Fallback for "steel only" blocks without explicit "other" (avoid ones we already used)
+    const steelOnlyRegex =
+      /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)[\s\S]{0,120}?Steel\s*value\s*:\s*([\d.,]+)/gi;
+    let so;
+    while((so = steelOnlyRegex.exec(big)) !== null){
+      const idx = so.index;
+      // skip if this start is already part of an assigned full block
+      if(usedBlockIdx.has(idx)) continue;
+
+      const steelKG = parseNum(so[1]);
+      const steelVal = parseNum(so[2]);
+      if(!isFinite(steelKG) && !isFinite(steelVal)) continue;
+
+      let bestIdx = -1;
+      let bestRel = Infinity;
+      let bestDist = Infinity;
+
+      items.forEach((it, i)=>{
+        const baseNet = meta[i].baseNetkg;
+        if(!isFinite(baseNet)) return;
+        if(idx <= it.idx) return; // should follow the item
+
+        const netRel = Math.abs(baseNet - steelKG) / Math.max(Math.abs(baseNet), Math.abs(steelKG), 1);
+        if(netRel > 0.6) return; // only accept somewhat similar weights
+
+        const dist = idx - it.idx;
+        if(netRel < bestRel - 1e-9 || (Math.abs(netRel - bestRel) < 1e-9 && dist < bestDist)){
+          bestRel = netRel;
+          bestDist = dist;
+          bestIdx = i;
+        }
+      });
+
+      if(bestIdx >= 0){
+        const info = steelInfo[bestIdx];
+        if(isFinite(steelKG)){
+          info.steelKG = isFinite(info.steelKG) ? (info.steelKG + steelKG) : steelKG;
+        }
+        if(isFinite(steelVal)){
+          info.steelVal = isFinite(info.steelVal) ? (info.steelVal + steelVal) : steelVal;
+        }
+      }
+    }
+
+    // 5) If no items, still push a placeholder for the invoice
+    if(!items.length){
+      ALL.push({
+        invoice_number:invNum, invoice_date:invDate, supplier, invoice_total:invTotal,
+        position:'', part_number:'', quantity:'', unit:'', unit_price:'',
+        line_total:'', net_weight:'', country_of_origin:''
+      });
+      return;
+    }
+
+    // 6) Build ALL rows (base + steel S-lines, clamped so steelVal ≤ original line total)
+    items.forEach((it, i)=>{
+      const pos = (i+1).toString();
+      const baseNetkg = meta[i].baseNetkg;
+      const netkgStr  = meta[i].netkgStr;
+      const coo       = meta[i].coo;
+      const baseVal   = it.lineTotal;
+
+      const unitPrice =
+        (isFinite(it.unitPricePer) && isFinite(it.perDivisor) && it.perDivisor>0)
+          ? (it.unitPricePer / it.perDivisor)
+          : '';
+
+      const origLineTotal = isFinite(baseVal) ? fmt2(baseVal) : '';
+
+      // Base line
+      ALL.push({
+        invoice_number: invNum,
+        invoice_date:  invDate,
+        supplier,
+        invoice_total: invTotal,
+        position: pos,
+        part_number: it.part,
+        quantity: isFinite(it.qty)? fmt2(it.qty) : '',
+        unit: it.unit,
+        unit_price: isFinite(unitPrice) ? fmt2(unitPrice) : '',
+        line_total: origLineTotal,
+        _origLineTotal: origLineTotal,
+        net_weight: netkgStr,
+        country_of_origin: coo
+      });
+
+      // Steel S-line if we have a value
+      let sInfo = steelInfo[i];
+      let sVal  = sInfo.steelVal;
+      let sKG   = sInfo.steelKG;
+
+      if(isFinite(sVal) && sVal > 0){
+        // Clamp so steel value never exceeds original line total
+        if(isFinite(baseVal) && baseVal > 0 && sVal > baseVal){
+          const ratio = baseVal / sVal;
+          sVal = baseVal;
+          if(isFinite(sKG)) sKG = sKG * ratio;
+        }
+
+        ALL.push({
+          invoice_number: invNum,
+          invoice_date:  invDate,
+          supplier,
+          invoice_total: invTotal,
+          position: pos + 'S',
+          part_number: 'Steel - ' + it.part,
+          quantity: isFinite(sKG)? fmt2(sKG):'',
+          unit:'KG',
+          unit_price:'',
+          line_total: fmt2(sVal),
+          net_weight:'',
+          country_of_origin: coo,
+          origin: 'auto_steel'
+        });
+      }
+    });
+  }
+
+  // ======= UI building & editing =======
+  function buildUI(){
+    UI.bar.style.display='flex';
+    const header = UI.thead, body = UI.tbody;
+    let sync=false;
+    body.addEventListener('scroll',()=>{
+      if(sync) return;
+      sync=true;
+      header.scrollLeft = body.scrollLeft;
+      sync=false;
+    });
+
+    UI.invSel.innerHTML = '<option value="">Select an invoice…</option>';
+    const metaInv = {};
+    ALL.forEach(r=>{
+      if(!metaInv[r.invoice_number]) metaInv[r.invoice_number] = {
+        date:r.invoice_date, supplier:r.supplier, total:r.invoice_total, count:0
+      };
+      metaInv[r.invoice_number].count++;
+    });
+
+    ORDER = Array.from(new Set(ALL.map(r=>r.invoice_number)));
+    ORDER.forEach(id=>{
+      const m = metaInv[id]||{date:'',supplier:'',total:'',count:0};
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent =
+        `Invoice ${id} — ${m.count} items — ${m.date} — ${m.supplier} — $${Number(m.total||0).toFixed(2)}`;
+      UI.invSel.appendChild(opt);
+    });
+
+    UI.invSel.onchange = ()=>{
+      CURRENT = UI.invSel.value;
+      if(CURRENT) renderInvoice(CURRENT);
+    };
+    UI.exportBtn.onclick = exportToDescartes;
+
+    if(!CURRENT) CURRENT = ORDER[0];
+    UI.invSel.value = CURRENT;
+    if(CURRENT) renderInvoice(CURRENT);
+
+    UI.invSel.tabIndex = 1;
+    UI.supplierInp.tabIndex = 2;
+    UI.dateInp.tabIndex = 3;
+    UI.totalInp.tabIndex = 4;
+  }
+
+  function sortedRowsForCurrent(){
+    const rows = ALL.filter(r=>r.invoice_number===CURRENT).slice();
+    rows.sort((a,b)=>{
+      const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+      const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
+      const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
+      if(an!==bn) return an-bn;
+      return (A[2]||'').localeCompare(B[2]||'');
+    });
+    return rows;
+  }
+
+  function renderInvoice(id){
+    const rows = sortedRowsForCurrent();
+    const meta = rows[0]||{};
+
+    UI.supplierInp.value = meta.supplier||'';
+    UI.dateInp.value     = meta.invoice_date||'';
+    UI.totalInp.value    = meta.invoice_total||'';
+
+    UI.stInv.textContent   = id;
+    UI.stItems.textContent = String(rows.length);
+    UI.stTotal.textContent = '$'+Number(meta.invoice_total||0).toFixed(2);
+
+    UI.rows.innerHTML = '';
+    rows.forEach((r, idx)=>{ UI.rows.appendChild(renderRow(r, idx)); });
+
+    UI.table.style.display='block';
+    UI.stats.style.display='grid';
+    recomputeStats();
+
+    UI.supplierInp.onchange = e=> { pushUndo(); updateHdr('supplier', e.target.value); };
+    UI.dateInp.onchange     = e=> { pushUndo(); updateHdr('invoice_date', e.target.value); };
+    UI.totalInp.onchange    = e=> { pushUndo(); updateHdr('invoice_total', e.target.value); recomputeStats(); };
+
+    rebuildTabOrder();
+  }
+
+  function renderRow(row, idx){
+    const tr = document.createElement('tr');
+    function cell(val, key, ro=false){
+      const td=document.createElement('td');
+      const inp=document.createElement('input');
+      inp.value = val==null? '' : String(val);
+      if(ro){
+        inp.className='readonly';
+        inp.readOnly=true;
+      }
+      inp.onchange = ()=>{
+        pushUndo();
+        updateCell(idx, key, inp.value);
+      };
+      inp.onkeydown = ev=>{
+        if(ev.key==='Enter' || ev.key==='Tab'){
+          ev.preventDefault();
+          focusNext(inp, ev.shiftKey?-1:1);
+        }
+      };
+      td.appendChild(inp);
+      return td;
+    }
+    const actions = document.createElement('td');
+    actions.className='actions';
+    const add = document.createElement('button');
+    add.className='btn add';
+    add.textContent='➕ Below';
+    add.onclick=()=> { pushUndo(); addBelow(idx); };
+    const del = document.createElement('button');
+    del.className='btn del';
+    del.textContent='🗑️';
+    del.onclick=()=> { pushUndo(); removeRow(idx); };
+    actions.appendChild(add);
+    actions.appendChild(del);
+
+    tr.appendChild(cell(row.position,'position'));
+    tr.appendChild(cell(row.part_number,'part_number'));
+    tr.appendChild(cell(row.quantity,'quantity'));
+    tr.appendChild(cell(row.unit,'unit'));
+    tr.appendChild(cell(row.unit_price,'unit_price'));
+    tr.appendChild(cell(row.line_total,'line_total'));
+    tr.appendChild(cell(row.net_weight,'net_weight'));
+    tr.appendChild(cell(row.country_of_origin,'country_of_origin'));
+    tr.appendChild(actions);
+    return tr;
+  }
+
+  function rebuildTabOrder(){
+    let ti = 10;
+    $$('#rows input').forEach(inp=>{ inp.tabIndex = ti++; });
+  }
+
+  function focusNext(current, dir){
+    const inputs = [
+      UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp,
+      ...$$('#rows input')
+    ].filter(Boolean);
+    const idx = inputs.indexOf(current);
+    const nextIdx = Math.max(0, Math.min(inputs.length-1, idx + (dir||1)));
+    const target = inputs[nextIdx];
+    if(target){
+      target.focus();
+      if(target.select) target.select();
+    }
+  }
+
+  function updateCell(viewIdx, key, val){
+    const rows = sortedRowsForCurrent();
+    const target = rows[viewIdx];
+    const idx = ALL.indexOf(target);
+    if(idx>=0){
+      ALL[idx][key]=val;
+      applySteelAdjustments(CURRENT);
+      renderInvoice(CURRENT);
+    }
+  }
+
+  function addBelow(viewIdx){
+    const rows = sortedRowsForCurrent();
+    const base = rows[viewIdx];
+    const baseNum = String(base.position||'').replace(/[A-Z]$/,'');
+    const insert = {
+      invoice_number: CURRENT,
+      invoice_date: base.invoice_date,
+      supplier: base.supplier,
+      invoice_total: base.invoice_total,
+      position: baseNum + 'S',
+      part_number:'',
+      quantity:'',
+      unit:'',
+      unit_price:'',
+      line_total:'',
+      net_weight:'',
+      country_of_origin: base.country_of_origin,
+      origin: 'manual_steel'
+    };
+    const idx = ALL.indexOf(base);
+    ALL.splice(idx+1, 0, insert);
+    applySteelAdjustments(CURRENT);
+    renderInvoice(CURRENT);
+  }
+
+  function removeRow(viewIdx){
+    const rows = sortedRowsForCurrent();
+    const target = rows[viewIdx];
+    const idx = ALL.indexOf(target);
+    if(idx>=0){
+      ALL.splice(idx,1);
+      applySteelAdjustments(CURRENT);
+      renderInvoice(CURRENT);
+    }
+  }
+
+  function updateHdr(field, val){
+    ALL.forEach(r=>{
+      if(r.invoice_number===CURRENT){
+        r[field]=val;
+      }
+    });
+  }
+
+  function recomputeStats(){
+    const rows = ALL.filter(r=>r.invoice_number===CURRENT);
+    const invTotal = parseNum(rows[0]?.invoice_total);
+    const sum = sumLines(rows);
+    UI.stTotal.textContent = '$'+(isFinite(invTotal)?invTotal.toFixed(2):'0.00');
+    UI.stSum.textContent   = '$'+sum.toFixed(2);
+    const diff = (isFinite(invTotal)?invTotal:0) - sum;
+    UI.stDiff.textContent  = '$'+diff.toFixed(2);
+  }
+
+  // === Steel adjustment: base line total = original − sum(steel sublines) ===
+  function applySteelAdjustments(invId){
+    if(!invId) return;
+    const rows = ALL.filter(r=>r.invoice_number===invId);
+    const groups = {};
+    rows.forEach(r=>{
+      const m = String(r.position||'').match(/^(\d+)([A-Z]?)$/);
+      if(!m) return;
+      const baseNum = m[1];
+      const suffix = (m[2]||'').toUpperCase();
+      if(!groups[baseNum]) groups[baseNum] = { base:null, steels:[] };
+      if(!suffix){
+        groups[baseNum].base = r;
+      } else if(suffix === 'S'){
+        groups[baseNum].steels.push(r);
+      }
+    });
+
+    Object.values(groups).forEach(group=>{
+      const base = group.base;
+      if(!base) return;
+      const orig = parseNum(base._origLineTotal || base.line_total);
+      if(!isFinite(orig)) return;
+      let steelSum = 0;
+      group.steels.forEach(s=>{
+        const v = parseNum(s.line_total);
+        if(isFinite(v)) steelSum += v;
+      });
+      const newTotal = Math.max(0, orig - steelSum);
+      base.line_total = fmt2(newTotal);
+    });
+  }
 
   // ======= SUPPLIER MID LOOKUP HELPERS =======
   function stripDiacritics(s){ 
@@ -395,59 +988,15 @@
   }
 
   function computeExportUnitPrice(item){
-    const q = parseFloat(item.quantity);
-    const t = parseFloat(item.line_total);
-    if (!isNaN(q) && q > 0 && !isNaN(t)) {
+    const q = parseNum(item.quantity);
+    const t = parseNum(item.line_total);
+    if (isFinite(q) && q > 0 && isFinite(t)) {
       return (t / q).toFixed(6);
     }
     return '';
   }
 
-  // ======= UI EVENT WIRING =======
-  UI.drop.addEventListener('click', ()=>UI.file.click());
-  UI.drop.addEventListener('dragover', e=>{e.preventDefault();e.stopPropagation();UI.drop.classList.add('dragover');});
-  UI.drop.addEventListener('dragleave',e=>{e.preventDefault();e.stopPropagation();UI.drop.classList.remove('dragover');});
-  UI.drop.addEventListener('drop', e=>{
-    e.preventDefault();e.stopPropagation();
-    UI.drop.classList.remove('dragover');
-    const f = e.dataTransfer.files[0];
-    if(f) loadPdf(f);
-  });
-  UI.file.addEventListener('change', e=>{ if(e.target.files[0]) loadPdf(e.target.files[0]); });
-
-
-  UI.exportBtn.addEventListener('click', exportToDescartes);
-  UI.newBtn.addEventListener('click', ()=>location.reload());
-  UI.undoBtn.addEventListener('click', undoLast);
-
-  function pushUndo(){
-    try{ undoStack.push(JSON.stringify({ALL,CURRENT})); if(undoStack.length>50)undoStack.shift(); }catch(e){}
-  }
-  function undoLast(){
-    if(!undoStack.length){ showAlert('Nothing to undo',false); return; }
-    try{
-      const snap = JSON.parse(undoStack.pop());
-      ALL = snap.ALL || [];
-      CURRENT = snap.CURRENT || CURRENT;
-      draw();
-      showAlert('Undid last action',true);
-    }catch(e){ console.error('Undo failed:',e); showAlert('Undo failed',false); }
-  }
-
-  function showAlert(msg, ok){
-    UI.alert.textContent = msg;
-    UI.alert.className = ok ? 'alert ok' : 'alert err';
-    setTimeout(()=> UI.alert.className='alert', 4000);
-  }
-
-
-  function fmt2(n){ return Number(n||0).toFixed(2); }
-
-
-
-
-
-  // ======= DESCARTES EXPORT WITH COMPLETE FUNCTIONALITY =======
+  // ======= Descartes export with enhanced functionality =======
   function exportToDescartes(){
     if(!ALL.length){
       showAlert('No data to export', false);
@@ -465,7 +1014,7 @@
     });
 
     const roundWeight = (val) => {
-      const num = parseFloat(val);
+      const num = parseNum(val);
       if (isNaN(num)) return '';
       if (num < 1 && num > 0) return 1;
       if (num <= 0) return '';
@@ -663,8 +1212,37 @@
       exportRows.push(row);
     });
 
+    const headers = [
+      'InvoiceNumber','InvoiceDate','InvoiceTotal','SupplierMID','SupplierName',
+      'BuyerPartNumber','SupplierPartNumber','Quantity','UnitOfMeasure','Description',
+      'UnitPrice','ItemTotal','CurrencyCode','ExchangeRate','CountryOfOrigin',
+      'CountryOfExport','DateOfExport','PortOfLading','RelatedParty','PO_Number',
+      'PO_Date','GrossWeight','GrossWeightUnit','NetWeight','TariffNumber',
+      'TariffDescription','Quantity1','UnitOfMeasure1','Quantity2','UnitOfMeasure2',
+      'Quantity3','UnitOfMeasure3','PrimarySPI','SecondarySPI','DeliverTo','SoldTo',
+      'SellerMID','ShipperMID','EntryDate','ArrivalDate','Carrier','Vessel','Voyage',
+      'PortOfEntry','PortOfUnloading','LocationCode','TotalCharges','BillOfLadingNumber',
+      'Container','SecondaryTariffNumber','SecondaryTariffdescription','Secondary Quantity1',
+      'Secondaryunitofmeasure1','secondaryquantity2','secondaryunitofmeasure2',
+      'secondaryquantity3','secondaryunitofmeasure3','secondaryvalue','FTZStatus',
+      'FTZPrivilegedDate\u00a0','ThirdTariffNumber','ThirdTariffDescription',
+      'ThirdTariffQuantity1','ThirdTariffUnitofMeasure1','ThirdTariffQuantity2',
+      'ThirdTariffUnitofMeasure2','ThirdTariffQuantity3','ThirdTariffUnitofMeasure3',
+      'Third Value','4TariffNumber','4TariffDescription','4TariffQuantity1',
+      '4TariffUnitofMeasure1','4TariffQuantity2','4TariffUnitofMeasure2',
+      '4TariffQuantity3','4TariffUnitofMeasure3','4 Value',
+      '5TariffNumber','5TariffDescription','5TariffQuantity1',
+      '5TariffUnitofMeasure1','5TariffQuantity2','5TariffUnitofMeasure2',
+      '5TariffQuantity3','5TariffUnitofMeasure3','5 Value'
+    ];
+
+    const aoa = [headers];
+    exportRows.forEach(r=>{
+      aoa.push(headers.map(h => (r[h] != null ? r[h] : '')));
+    });
+
     const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(exportRows);
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
     XLSX.utils.book_append_sheet(wb, ws, 'DescartesUpload');
 
     const out  = XLSX.write(wb, {type:'array', bookType:'xlsx'});
@@ -679,8 +1257,6 @@
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-
-    showAlert('Descartes template exported successfully!', true);
   }
 </script>
 </body>
