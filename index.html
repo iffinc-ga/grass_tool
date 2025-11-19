@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Grass Invoice PDF Parser — Steel/Other (final-match, next-part fence)</title>
+  <title>Grass Invoice PDF Parser — Steel-only + Descartes export</title>
   <!-- Libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
@@ -23,7 +23,7 @@
     .spinner{border:4px solid #e5e7eb;border-top:4px solid #6366f1;border-radius:50%;width:44px;height:44px;margin:0 auto 12px;animation:spin 1s linear infinite}
     @keyframes spin{to{transform:rotate(360deg)}}
     .bar{display:flex;gap:12px;align-items:center;padding:16px 20px;background:#f8fafc;border-top:1px solid #eef2ff;border-bottom:1px solid #eef2ff}
-    .bar select,.bar input{padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;min-width:280px}
+    .bar select,.bar input{padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;min-width:220px}
     .bar button{padding:10px 14px;border:0;border-radius:10px;background:#111;color:#fff;font-weight:700;cursor:pointer}
     .bar .ghost{background:#eef2ff;color:#111}
     .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;padding:16px 20px;background:#fff}
@@ -52,14 +52,14 @@
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Grass Invoice PDF Parser (Steel/Other sublines)</h1>
-      <p>Anchors by part number, fences to the <b>next part</b>, uses the <b>last</b> steel/other values in the region.</p>
+      <h1>Grass Invoice PDF Parser (Steel-only)</h1>
+      <p>Only steel sublines are kept. Base line total = original invoice total − sum of steel sublines.</p>
     </div>
 
     <div class="upload" id="upload">
       <div class="drop" id="drop">
         <h3>📤 Click or Drag & Drop a PDF</h3>
-        <p style="margin-top:6px;color:#6b7280">Optimized for Grass consolidated invoice format. Multiple invoices supported.</p>
+        <p style="margin-top:6px;color:#6b7280">Optimized for Grass consolidated invoice format.</p>
         <input id="fileInput" type="file" accept="application/pdf,.pdf" />
       </div>
     </div>
@@ -109,9 +109,10 @@
   </div>
 
 <script>
-  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-  const $ = s => document.querySelector(s);
+  const $  = s => document.querySelector(s);
   const $$ = s => Array.from(document.querySelectorAll(s));
 
   const UI = {
@@ -127,14 +128,16 @@
   let ALL = [], ORDER = [], CURRENT = '', filename = '';
 
   function showAlert(msg, ok=true){
-    UI.alert.className = 'alert ' + (ok ? 'ok' : 'err');
+    UI.alert.className = 'alert ' + (ok?'ok':'err');
     UI.alert.textContent = msg;
     UI.alert.style.display='block';
     setTimeout(()=> UI.alert.style.display='none', 3200);
   }
+
   function parseNum(s){
     if(s==null) return NaN;
-    const t=String(s).trim(); if(!t) return NaN;
+    const t=String(s).trim();
+    if(!t) return NaN;
     if(/\d+[.,]\d{3}[.,]\d{2}$/.test(t)){
       const last = t.lastIndexOf('.')>t.lastIndexOf(',')?'.':',';
       const intPart=t.slice(0,t.lastIndexOf(last)).replace(/[.,\s]/g,'');
@@ -144,25 +147,40 @@
     if(/,\d{2}$/.test(t) && !/\.\d{2}$/.test(t)) return parseFloat(t.replace(/\./g,'').replace(',','.'));
     return parseFloat(t.replace(/,/g,''));
   }
-  const fmt2 = n => (isFinite(+n)? (+n).toFixed(2):'');
+
+  const fmt2  = n => (isFinite(+n)? (+n).toFixed(2):'');
   const toUS = d => {
     const m=String(d||'').match(/(\d{2})\.(\d{2})\.(\d{4})/);
     return m ? `${m[2]}/${m[1]}/${m[3]}` : (d||'');
   };
   const sumLines = list => list.reduce((a,r)=> a + (parseNum(r.line_total)||0), 0);
-  const nextLetterPos = base => (String(base||'').replace(/[^0-9].*$/,'') || '0') + (Math.random()<0.5?'S':'A');
 
   UI.drop.addEventListener('click', ()=> UI.file.click());
-  UI.file.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f); });
-  UI.drop.addEventListener('dragover', e=>{ e.preventDefault(); UI.drop.style.background='#f1f5ff'; });
+  UI.file.addEventListener('change', e=>{
+    const f=e.target.files?.[0];
+    if(f) handleFile(f);
+  });
+  UI.drop.addEventListener('dragover', e=>{
+    e.preventDefault();
+    UI.drop.style.background='#f1f5ff';
+  });
   UI.drop.addEventListener('dragleave', ()=> UI.drop.style.background='');
-  UI.drop.addEventListener('drop', e=>{ e.preventDefault(); UI.drop.style.background=''; const f=e.dataTransfer.files?.[0]; if(f) handleFile(f); });
+  UI.drop.addEventListener('drop', e=>{
+    e.preventDefault();
+    UI.drop.style.background='';
+    const f=e.dataTransfer.files?.[0];
+    if(f) handleFile(f);
+  });
   UI.newBtn.addEventListener('click', ()=> location.reload());
 
   async function handleFile(file){
-    if(!/\.pdf$/i.test(file.name)){ showAlert('Please upload a PDF file', false); return; }
+    if(!/\.pdf$/i.test(file.name)){
+      showAlert('Please upload a PDF file', false);
+      return;
+    }
     filename = file.name.replace(/\.pdf$/i,'');
-    UI.upload.style.display='none'; UI.loading.style.display='block';
+    UI.upload.style.display='none';
+    UI.loading.style.display='block';
     try{
       const buf = new Uint8Array(await file.arrayBuffer());
       const pdf = await pdfjsLib.getDocument({data:buf}).promise;
@@ -172,7 +190,9 @@
           const page = await pdf.getPage(i);
           const tc = await page.getTextContent({includeMarkedContent:true});
           text += (tc.items||[]).map(it=> it?.str || '').join(' ') + "\n";
-        }catch(e){ console.warn('page read failed', i, e); }
+        }catch(e){
+          console.warn('page read failed', i, e);
+        }
       }
       if(!text.trim()){
         showAlert('PDF has no extractable text (maybe scanned). Try OCR.', false);
@@ -180,9 +200,14 @@
         return;
       }
       parseGrass(text);
+      // after building ALL, adjust all invoices once based on steel sublines
+      ORDER.forEach(id => applySteelAdjustments(id));
       if(ALL.length){
         buildUI();
-        showAlert(`Found ${new Set(ALL.map(x=>x.invoice_number)).size} invoice(s), ${ALL.length} row(s)`, true);
+        showAlert(
+          `Found ${new Set(ALL.map(x=>x.invoice_number)).size} invoice(s), ${ALL.length} row(s)`,
+          true
+        );
       } else {
         showAlert('No invoice rows were parsed. Try another file or adjust patterns.', false);
         UI.upload.style.display='block';
@@ -191,13 +216,14 @@
       console.error(err);
       showAlert('Error: '+(err.message||String(err)), false);
       UI.upload.style.display='block';
-    } finally {
+    } finally{
       UI.loading.style.display='none';
     }
   }
 
   function parseGrass(text){
-    ALL.length = 0; ORDER.length = 0;
+    ALL.length = 0;
+    ORDER.length = 0;
     const big = String(text||'');
 
     // Invoice meta (single consolidated invoice number)
@@ -209,7 +235,6 @@
     const dm = big.match(/Date:\s*(\d{2}\.\d{2}\.\d{4})/);
     if(dm) invDate = toUS(dm[1]);
 
-    // Supplier compact
     let supplier = 'GRASS GmbH';
     if(/\bGRASS\s+GmbH\s+(Österreich|Osterreich)\b/i.test(big)) supplier = 'GRASS GmbH Österreich';
 
@@ -218,18 +243,19 @@
     if(tm) invTotal = String(parseNum(tm[1])||'');
 
     // Base items
-    const itemRegex = /\b(F[0-9]{9,})\s+(\d+[\d.,]*)\s+(PCS|PC|SET|PAIRS?)\s+([\d.,]+)\s*\/\s*(\d+)\s+([\d.,]+)\s+USD/gi;
+    const itemRegex =
+      /\b(F[0-9]{9,})\s+(\d+[\d.,]*)\s+(PCS|PC|SET|PAIRS?)\s+([\d.,]+)\s*\/\s*(\d+)\s+([\d.,]+)\s+USD/gi;
     const items = [];
     let m;
     while((m = itemRegex.exec(big)) !== null){
       items.push({
-        idx:m.index,
-        part:m[1],
-        qty:parseNum(m[2]),
-        unit:m[3].toUpperCase(),
-        unitPricePer:parseNum(m[4]),
-        perDivisor:parseNum(m[5]),
-        lineTotal:parseNum(m[6])
+        idx: m.index,
+        part: m[1],
+        qty: parseNum(m[2]),
+        unit: m[3].toUpperCase(),
+        unitPricePer: parseNum(m[4]),
+        perDivisor: parseNum(m[5]),
+        lineTotal: parseNum(m[6])
       });
     }
 
@@ -243,96 +269,87 @@
     }
 
     items.forEach((it, i)=>{
-      // Fence slab by next item
       const start = it.idx;
       const end = (i < items.length-1 ? items[i+1].idx : start + 10000);
       const slab = big.slice(start, end);
 
-      // COO & net weight
       let coo = '';
       const cooM = slab.match(/Country\s+of\s+Origin:\s*([A-Z]{2})/i);
       if(cooM) coo = cooM[1].toUpperCase();
-      let netkg = '';
-      const wM = slab.match(/Net\s+weight\s+in\s+kg:\s*([\d.,]+)/i);
-      if(wM) netkg = fmt2(parseNum(wM[1]));
 
-      // Anchor region by this exact part and fence to next F#########
+      let netkgStr = '';
+      const wM = slab.match(/Net\s+weight\s+in\s*kg:\s*([\d.,]+)/i);
+      if(wM) netkgStr = fmt2(parseNum(wM[1]));
+
+      // Anchor region by part and fence to next part
       const escPart = it.part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const partAnchor = new RegExp('\\b' + escPart + '\\b', 'i');
       const partIdx = slab.search(partAnchor);
       const regionStart = partIdx >= 0 ? partIdx : 0;
       const afterPart = slab.slice(regionStart);
-
       const nextPartRel = afterPart.slice(10).search(/\bF[0-9]{9,}\b/);
-      const fenceEndRel = nextPartRel > -1 ? (10 + nextPartRel) : Math.min(afterPart.length, 8000);
+      const fenceEndRel =
+        nextPartRel > -1 ? (10 + nextPartRel) : Math.min(afterPart.length, 8000);
       const region = afterPart.slice(0, fenceEndRel);
 
-      // LAST-match logic inside the fenced region
-      let steelKG=NaN, steelVal=NaN, otherKG=NaN, otherVal=NaN;
-
+      // Steel-only parsing: last steel value / steel weight in region
+      let steelKG = NaN;
+      let steelVal = NaN;
       const sKGs  = [...region.matchAll(/Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)/gi)];
-      const oKGs  = [...region.matchAll(/Net\s*weight\s*in\s*kg\s*in\s*other\s*:\s*([\d.,]+)/gi)];
       const sVals = [...region.matchAll(/Steel\s*value\s*:\s*([\d.,]+)/gi)];
-      const oVals = [...region.matchAll(/Other\s*value\s*:\s*([\d.,]+)/gi)];
-
       if(sKGs.length) steelKG = parseNum(sKGs[sKGs.length-1][1]);
-      if(oKGs.length) otherKG = parseNum(oKGs[oKGs.length-1][1]);
       if(sVals.length) steelVal = parseNum(sVals[sVals.length-1][1]);
-      if(oVals.length) otherVal = parseNum(oVals[oVals.length-1][1]);
 
-      // Fallback widen if still missing steel/other values: look in entire slab after part
-      if(!isFinite(steelVal) || !isFinite(otherVal)){
+      // Fallback widen in slab if still missing steelVal
+      if(!isFinite(steelVal)){
         const sAll = [...afterPart.matchAll(/Steel\s*value\s*:\s*([\d.,]+)/gi)];
-        const oAll = [...afterPart.matchAll(/Other\s*value\s*:\s*([\d.,]+)/gi)];
-        if(!isFinite(steelVal) && sAll.length) steelVal = parseNum(sAll[sAll.length-1][1]);
-        if(!isFinite(otherVal) && oAll.length) otherVal = parseNum(oAll[oAll.length-1][1]);
+        if(sAll.length) steelVal = parseNum(sAll[sAll.length-1][1]);
       }
 
-      console.debug('PART', it.part, 'steelVal=', steelVal, 'otherVal=', otherVal, 'regionLen=', region.length);
+      console.debug('PART', it.part, 'lineTotal=', it.lineTotal, 'steelVal=', steelVal, 'steelKG=', steelKG);
 
-      // Unit price in selling unit
-      const unitPrice = (isFinite(it.unitPricePer) && isFinite(it.perDivisor) && it.perDivisor>0)
-        ? (it.unitPricePer / it.perDivisor)
-        : '';
+      const unitPrice =
+        (isFinite(it.unitPricePer) && isFinite(it.perDivisor) && it.perDivisor>0)
+          ? (it.unitPricePer / it.perDivisor)
+          : '';
 
       const pos = (i+1).toString();
+      const origLineTotal = isFinite(it.lineTotal) ? fmt2(it.lineTotal) : '';
 
-      // Adjust main line by auto-detected subvalues (steel + other)
-      let baseTotal = it.lineTotal;
-      const subSteel = isFinite(steelVal)? steelVal : 0;
-      const subOther = isFinite(otherVal)? otherVal : 0;
-      if(isFinite(baseTotal)) baseTotal = Math.max(0, baseTotal - subSteel - subOther);
-
-      const autoBaseTotal = isFinite(baseTotal) ? fmt2(baseTotal) : '';
-
-      // Base line
+      // Base line: start with original invoice total, keep a copy for later
       ALL.push({
-        invoice_number: invNum, invoice_date: invDate, supplier, invoice_total: invTotal,
-        position: pos, part_number: it.part,
-        quantity: isFinite(it.qty)? fmt2(it.qty) : '', unit: it.unit,
+        invoice_number: invNum,
+        invoice_date: invDate,
+        supplier,
+        invoice_total: invTotal,
+        position: pos,
+        part_number: it.part,
+        quantity: isFinite(it.qty)? fmt2(it.qty) : '',
+        unit: it.unit,
         unit_price: isFinite(unitPrice) ? fmt2(unitPrice) : '',
-        line_total: autoBaseTotal,
-        _autoBaseTotal: autoBaseTotal,   // for later manual steel adjustments
-        net_weight: netkg, country_of_origin: coo
+        line_total: origLineTotal,         // will be adjusted later
+        _origLineTotal: origLineTotal,     // immutable original
+        net_weight: netkgStr,
+        country_of_origin: coo
       });
 
-      // Steel subline (auto)
+      // Steel subline (auto) if we have a steel value
+      const subSteel = isFinite(steelVal)? steelVal : NaN;
       if(isFinite(subSteel) && subSteel>0){
         ALL.push({
-          invoice_number: invNum, invoice_date: invDate, supplier, invoice_total: invTotal,
-          position: pos + 'S', part_number: 'Steel - ' + it.part,
-          quantity: isFinite(steelKG)? fmt2(steelKG):'', unit:'KG', unit_price:'',
-          line_total: fmt2(subSteel), net_weight:'', country_of_origin: coo
-        });
-      }
-
-      // Other subline (auto) – kept in UI but not specially treated for manual adjustments
-      if(isFinite(subOther) && subOther>0){
-        ALL.push({
-          invoice_number: invNum, invoice_date: invDate, supplier, invoice_total: invTotal,
-          position: pos + 'A', part_number: 'Other - ' + it.part,
-          quantity: isFinite(otherKG)? fmt2(otherKG):'', unit:'KG', unit_price:'',
-          line_total: fmt2(subOther), net_weight:'', country_of_origin: coo
+          invoice_number: invNum,
+          invoice_date: invDate,
+          supplier,
+          invoice_total: invTotal,
+          position: pos + 'S',
+          part_number: 'Steel - ' + it.part,
+          quantity: isFinite(steelKG)? fmt2(steelKG):'',
+          unit:'KG',
+          unit_price:'',
+          line_total: fmt2(subSteel),
+          net_weight:'',
+          country_of_origin: coo,
+          origin: 'auto_steel'
         });
       }
     });
@@ -340,35 +357,50 @@
 
   function buildUI(){
     UI.bar.style.display='flex';
-    const header = UI.thead, body = UI.tbody; let sync=false;
-    body.addEventListener('scroll',()=>{ if(sync) return; sync=true; header.scrollLeft = body.scrollLeft; sync=false; });
+    const header = UI.thead, body = UI.tbody;
+    let sync=false;
+    body.addEventListener('scroll',()=>{
+      if(sync) return;
+      sync=true;
+      header.scrollLeft = body.scrollLeft;
+      sync=false;
+    });
 
     UI.invSel.innerHTML = '<option value="">Select an invoice…</option>';
     const meta = {};
     ALL.forEach(r=>{
-      if(!meta[r.invoice_number]) meta[r.invoice_number] = {date:r.invoice_date,supplier:r.supplier,total:r.invoice_total,count:0};
+      if(!meta[r.invoice_number]) meta[r.invoice_number] = {
+        date:r.invoice_date, supplier:r.supplier, total:r.invoice_total, count:0
+      };
       meta[r.invoice_number].count++;
     });
     ORDER.forEach(id=>{
       const m = meta[id]||{date:'',supplier:'',total:'',count:0};
       const opt = document.createElement('option');
       opt.value = id;
-      opt.textContent = `Invoice ${id} — ${m.count} items — ${m.date} — ${m.supplier} — $${Number(m.total||0).toFixed(2)}`;
+      opt.textContent =
+        `Invoice ${id} — ${m.count} items — ${m.date} — ${m.supplier} — $${Number(m.total||0).toFixed(2)}`;
       UI.invSel.appendChild(opt);
     });
 
-    UI.invSel.onchange = ()=>{ CURRENT = UI.invSel.value; if(CURRENT){ renderInvoice(CURRENT); } };
+    UI.invSel.onchange = ()=>{
+      CURRENT = UI.invSel.value;
+      if(CURRENT){ renderInvoice(CURRENT); }
+    };
     UI.exportBtn.onclick = exportToDescartes;
 
     CURRENT = ORDER[0];
     UI.invSel.value = CURRENT;
     renderInvoice(CURRENT);
 
-    UI.invSel.tabIndex = 1; UI.supplierInp.tabIndex = 2; UI.dateInp.tabIndex = 3; UI.totalInp.tabIndex = 4;
+    UI.invSel.tabIndex = 1;
+    UI.supplierInp.tabIndex = 2;
+    UI.dateInp.tabIndex = 3;
+    UI.totalInp.tabIndex = 4;
   }
 
-  function renderInvoice(id){
-    const rows = ALL.filter(r=>r.invoice_number===id).slice();
+  function sortedRowsForCurrent(){
+    const rows = ALL.filter(r=>r.invoice_number===CURRENT).slice();
     rows.sort((a,b)=>{
       const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
       const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
@@ -376,8 +408,13 @@
       if(an!==bn) return an-bn;
       return (A[2]||'').localeCompare(B[2]||'');
     });
+    return rows;
+  }
 
+  function renderInvoice(id){
+    const rows = sortedRowsForCurrent();
     const meta = rows[0]||{};
+
     UI.supplierInp.value = meta.supplier||'';
     UI.dateInp.value = meta.invoice_date||'';
     UI.totalInp.value = meta.invoice_total||'';
@@ -391,12 +428,11 @@
 
     UI.table.style.display='block';
     UI.stats.style.display='grid';
-
     recomputeStats();
 
     UI.supplierInp.onchange = e=> updateHdr('supplier', e.target.value);
-    UI.dateInp.onchange = e=> updateHdr('invoice_date', e.target.value);
-    UI.totalInp.onchange = e=> { updateHdr('invoice_total', e.target.value); recomputeStats(); };
+    UI.dateInp.onchange     = e=> updateHdr('invoice_date', e.target.value);
+    UI.totalInp.onchange    = e=> { updateHdr('invoice_total', e.target.value); recomputeStats(); };
 
     rebuildTabOrder();
   }
@@ -407,10 +443,13 @@
       const td=document.createElement('td');
       const inp=document.createElement('input');
       inp.value = val==null? '' : String(val);
-      if(ro){ inp.className='readonly'; inp.readOnly=true; }
+      if(ro){
+        inp.className='readonly';
+        inp.readOnly=true;
+      }
       inp.onchange = ()=> updateCell(idx, key, inp.value);
       inp.onkeydown = ev=>{
-        if(ev.key==='Enter'){
+        if(ev.key==='Enter' || ev.key==='Tab'){
           ev.preventDefault();
           focusNext(inp, ev.shiftKey?-1:1);
         }
@@ -418,10 +457,18 @@
       td.appendChild(inp);
       return td;
     }
-    const actions = document.createElement('td'); actions.className='actions';
-    const add = document.createElement('button'); add.className='btn add'; add.textContent='➕ Below'; add.onclick=()=> addBelow(idx);
-    const del = document.createElement('button'); del.className='btn del'; del.textContent='🗑️'; del.onclick=()=> removeRow(idx);
-    actions.appendChild(add); actions.appendChild(del);
+    const actions = document.createElement('td');
+    actions.className='actions';
+    const add = document.createElement('button');
+    add.className='btn add';
+    add.textContent='➕ Below';
+    add.onclick=()=> addBelow(idx);
+    const del = document.createElement('button');
+    del.className='btn del';
+    del.textContent='🗑️';
+    del.onclick=()=> removeRow(idx);
+    actions.appendChild(add);
+    actions.appendChild(del);
 
     tr.appendChild(cell(row.position,'position'));
     tr.appendChild(cell(row.part_number,'part_number'));
@@ -439,48 +486,42 @@
     let ti = 10;
     $$('#rows input').forEach(inp=>{ inp.tabIndex = ti++; });
   }
+
   function focusNext(current, dir){
-    const inputs = [UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp, ...$$('#rows input')].filter(Boolean);
+    const inputs = [
+      UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp,
+      ...$$('#rows input')
+    ].filter(Boolean);
     const idx = inputs.indexOf(current);
     const nextIdx = Math.max(0, Math.min(inputs.length-1, idx + (dir||1)));
     const target = inputs[nextIdx];
-    if(target){ target.focus(); target.select?.(); }
+    if(target){
+      target.focus();
+      if(target.select) target.select();
+    }
   }
 
   function updateCell(viewIdx, key, val){
-    const rows = ALL.filter(r=>r.invoice_number===CURRENT).slice();
-    rows.sort((a,b)=>{
-      const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
-      const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
-      const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
-      if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
-    });
+    const rows = sortedRowsForCurrent();
     const target = rows[viewIdx];
     const idx = ALL.indexOf(target);
     if(idx>=0){
       ALL[idx][key]=val;
-      // After any edit, re-apply manual steel adjustments for this invoice
-      applyManualSteelAdjustments(CURRENT);
+      applySteelAdjustments(CURRENT);
       renderInvoice(CURRENT);
     }
   }
 
   function addBelow(viewIdx){
-    const rows = ALL.filter(r=>r.invoice_number===CURRENT).slice();
-    rows.sort((a,b)=>{
-      const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
-      const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
-      const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
-      if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
-    });
+    const rows = sortedRowsForCurrent();
     const base = rows[viewIdx];
-    const parentPosNum = String(base.position||'').replace(/[A-Z]$/,'');
+    const baseNum = String(base.position||'').replace(/[A-Z]$/,'');
     const insert = {
       invoice_number: CURRENT,
       invoice_date: base.invoice_date,
       supplier: base.supplier,
       invoice_total: base.invoice_total,
-      position: parentPosNum + 'S',    // default manual steel subline
+      position: baseNum + 'S',
       part_number:'',
       quantity:'',
       unit:'',
@@ -488,34 +529,31 @@
       line_total:'',
       net_weight:'',
       country_of_origin: base.country_of_origin,
-      is_manual_subline: true,
-      parent_position: parentPosNum
+      origin: 'manual_steel'
     };
     const idx = ALL.indexOf(base);
     ALL.splice(idx+1, 0, insert);
-    applyManualSteelAdjustments(CURRENT);
+    applySteelAdjustments(CURRENT);
     renderInvoice(CURRENT);
   }
 
   function removeRow(viewIdx){
-    const rows = ALL.filter(r=>r.invoice_number===CURRENT).slice();
-    rows.sort((a,b)=>{
-      const A=(String(a.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
-      const B=(String(b.position||'').match(/^(\d+)([A-Z]?)$/)||[]);
-      const an=parseInt(A[1]||999999,10), bn=parseInt(B[1]||999999,10);
-      if(an!==bn) return an-bn; return (A[2]||'').localeCompare(B[2]||'');
-    });
+    const rows = sortedRowsForCurrent();
     const target = rows[viewIdx];
     const idx = ALL.indexOf(target);
     if(idx>=0){
       ALL.splice(idx,1);
-      applyManualSteelAdjustments(CURRENT);
+      applySteelAdjustments(CURRENT);
       renderInvoice(CURRENT);
     }
   }
 
   function updateHdr(field, val){
-    ALL.forEach(r=>{ if(r.invoice_number===CURRENT){ r[field]=val; }});
+    ALL.forEach(r=>{
+      if(r.invoice_number===CURRENT){
+        r[field]=val;
+      }
+    });
   }
 
   function recomputeStats(){
@@ -523,13 +561,13 @@
     const invTotal = parseNum(rows[0]?.invoice_total);
     const sum = sumLines(rows);
     UI.stTotal.textContent = '$'+(isFinite(invTotal)?invTotal.toFixed(2):'0.00');
-    UI.stSum.textContent = '$'+sum.toFixed(2);
+    UI.stSum.textContent   = '$'+sum.toFixed(2);
     const diff = (isFinite(invTotal)?invTotal:0) - sum;
-    UI.stDiff.textContent = '$'+diff.toFixed(2);
+    UI.stDiff.textContent  = '$'+diff.toFixed(2);
   }
 
-  // === Manual steel adjustment helper ===
-  function applyManualSteelAdjustments(invId){
+  // --- Steel adjustment: base line total = original − sum(steel sublines) ---
+  function applySteelAdjustments(invId){
     if(!invId) return;
     const rows = ALL.filter(r=>r.invoice_number===invId);
     const groups = {};
@@ -537,38 +575,37 @@
       const m = String(r.position||'').match(/^(\d+)([A-Z]?)$/);
       if(!m) return;
       const baseNum = m[1];
-      const suffix = m[2] || '';
-      if(!groups[baseNum]) groups[baseNum] = { base:null, manuals:[] };
+      const suffix = (m[2]||'').toUpperCase();
+      if(!groups[baseNum]) groups[baseNum] = { base:null, steels:[] };
       if(!suffix){
         groups[baseNum].base = r;
-      } else if(suffix === 'S' && r.is_manual_subline){
-        groups[baseNum].manuals.push(r);
+      } else if(suffix === 'S'){
+        groups[baseNum].steels.push(r);
       }
     });
 
     Object.values(groups).forEach(group=>{
-      if(!group.base) return;
       const base = group.base;
-      const autoBase = parseNum(base._autoBaseTotal || base.line_total);
-      if(!isFinite(autoBase)) return;
-      let manualSteelSum = 0;
-      group.manuals.forEach(s=>{
+      if(!base) return;
+      const orig = parseNum(base._origLineTotal || base.line_total);
+      if(!isFinite(orig)) return;
+      let steelSum = 0;
+      group.steels.forEach(s=>{
         const v = parseNum(s.line_total);
-        if(isFinite(v)) manualSteelSum += v;
+        if(isFinite(v)) steelSum += v;
       });
-      const newTotal = Math.max(0, autoBase - manualSteelSum);
+      const newTotal = Math.max(0, orig - steelSum);
       base.line_total = fmt2(newTotal);
     });
   }
 
-  // === Descartes export (all invoices) ===
+  // === Descartes export ===
   function exportToDescartes(){
     if(!ALL.length){
       showAlert('No data to export', false);
       return;
     }
 
-    // Sort by invoice, then numeric position, then suffix
     const items = ALL.slice().sort((a,b)=>{
       const ai = String(a.invoice_number||''); const bi = String(b.invoice_number||'');
       if (ai !== bi) return ai.localeCompare(bi);
@@ -587,7 +624,6 @@
       return Math.round(num);
     };
 
-    // Map invoice -> supplier (prefer UI edited value)
     const currentUiSupplierByInvoice = {};
     try{
       const uiSupplier = UI.supplierInp?.value || '';
@@ -718,12 +754,14 @@
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     XLSX.utils.book_append_sheet(wb, ws, 'DescartesUpload');
 
-    const out = XLSX.write(wb, {type:'array', bookType:'xlsx'});
-    const blob = new Blob([out], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+    const out  = XLSX.write(wb, {type:'array', bookType:'xlsx'});
+    const blob = new Blob([out], {
+      type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = (filename ? filename + '_' : '') + 'descartes_ci_upload.xlsx';
+    const a   = document.createElement('a');
+    a.href    = url;
+    a.download = (filename? filename + '_' : '') + 'descartes_ci_upload.xlsx';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
