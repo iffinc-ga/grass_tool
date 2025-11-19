@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Grass Invoice PDF Parser — Steel-only + DB + Descartes Export</title>
+  <title>Grass Invoice PDF Parser — Steel-only + Undo</title>
   <!-- Libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
@@ -65,7 +65,7 @@
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Grass Invoice PDF Parser (Steel-only)</h1>
+      <h1>Grass Invoice PDF Parser (Steel-only + Undo)</h1>
       <p>Only steel sublines are kept. Base line total = original invoice total − sum of steel sublines.</p>
     </div>
 
@@ -97,7 +97,8 @@
       <input id="supplierInp" placeholder="Supplier (edit)" />
       <input id="dateInp" placeholder="Invoice Date MM/DD/YYYY" />
       <input id="totalInp" type="number" step="0.01" placeholder="Invoice Total (USD)" />
-      <button id="exportBtn">Export to Descartes Template</button>
+      <button id="exportBtn">Export</button>
+      <button id="undoBtn" class="ghost">Undo last change</button>
       <button id="newBtn" class="ghost">New Upload</button>
     </div>
 
@@ -143,16 +144,18 @@
     stats: $('#stats'), stInv: $('#stInv'), stItems: $('#stItems'),
     stTotal: $('#stTotal'), stSum: $('#stSum'), stDiff: $('#stDiff'),
     table: $('#table'), thead: $('#thead'), tbody: $('#tbody'),
-    rows: $('#rows'), exportBtn: $('#exportBtn'), newBtn: $('#newBtn')
+    rows: $('#rows'), exportBtn: $('#exportBtn'), newBtn: $('#newBtn'),
+    undoBtn: $('#undoBtn')
   };
 
   let ALL = [], ORDER = [], CURRENT = '', filename = '';
-  let grassDb = []; // hydrated from updated_grass_db.xlsx when available
+  let grassDb = []; // populated from updated_grass_db.xlsx when available
+  let undoStack = [];
 
   // ======= DB loader for updated_grass_db.xlsx =======
   const GITHUB_CONFIG = {
     owner: 'iffinc-ga',
-    repo:  'all_in_one_manki',     // adjust here if needed
+    repo:  'all_in_one_manki',   // adjust if needed
     branch:'main',
     filePath: 'updated_grass_db.xlsx'
   };
@@ -227,10 +230,7 @@
 
   retryDbBtn?.addEventListener('click', ()=> loadDatabaseFromGitHub().catch(()=>{}));
   offlineDbBtn?.addEventListener('click', ()=> enterOfflineMode('Offline mode selected by user.'));
-
-  window.addEventListener('DOMContentLoaded', ()=>{
-    loadDatabaseFromGitHub().catch(()=>{});
-  });
+  window.addEventListener('DOMContentLoaded', ()=>{ loadDatabaseFromGitHub().catch(()=>{}); });
 
   // ======= Utility helpers =======
   function showAlert(msg, ok=true){
@@ -262,6 +262,29 @@
   };
   const sumLines = list => list.reduce((a,r)=> a + (parseNum(r.line_total)||0), 0);
 
+  // Undo stack
+  function pushUndo(){
+    // Deep copy ALL; limit history to last 50 steps
+    undoStack.push(JSON.parse(JSON.stringify(ALL)));
+    if(undoStack.length > 50) undoStack.shift();
+  }
+
+  function undoLast(){
+    if(!undoStack.length){
+      showAlert('Nothing to undo', false);
+      return;
+    }
+    ALL = undoStack.pop() || [];
+    ORDER = Array.from(new Set(ALL.map(r=>r.invoice_number)));
+    if(!CURRENT || !ORDER.includes(CURRENT)) CURRENT = ORDER[0] || '';
+    if(!ORDER.length){
+      UI.table.style.display='none';
+      UI.stats.style.display='none';
+      return;
+    }
+    buildUI();
+  }
+
   // ======= File handling =======
   UI.drop.addEventListener('click', ()=> UI.file.click());
   UI.file.addEventListener('change', e=>{
@@ -280,6 +303,7 @@
     if(f) handleFile(f);
   });
   UI.newBtn.addEventListener('click', ()=> location.reload());
+  UI.undoBtn.addEventListener('click', undoLast);
 
   async function handleFile(file){
     if(!/\.pdf$/i.test(file.name)){
@@ -289,6 +313,8 @@
     filename = file.name.replace(/\.pdf$/i,'');
     UI.upload.style.display='none';
     UI.loading.style.display='block';
+    undoStack = [];  // reset undo history
+
     try{
       const buf = new Uint8Array(await file.arrayBuffer());
       const pdf = await pdfjsLib.getDocument({data:buf}).promise;
@@ -309,6 +335,7 @@
       }
       parseGrass(text);
       ORDER.forEach(id => applySteelAdjustments(id));
+
       if(ALL.length){
         buildUI();
         showAlert(
@@ -328,7 +355,7 @@
     }
   }
 
-  // ======= Core Grass parsing (global steel pairing by net weight) =======
+  // ======= Core Grass parsing (steel blocks matched by net weight + value) =======
   function parseGrass(text){
     ALL.length = 0;
     ORDER.length = 0;
@@ -368,13 +395,8 @@
       });
     }
 
-    // 2) Precompute base meta (net weight, COO) for each item
-    const meta = items.map(()=>({
-      baseNetkg: NaN,
-      netkgStr: '',
-      coo: ''
-    }));
-
+    // 2) Precompute base meta: net weight, COO
+    const meta = items.map(()=>({ baseNetkg: NaN, netkgStr:'', coo:'' }));
     items.forEach((it, i)=>{
       const start = it.idx;
       const end   = (i < items.length-1 ? items[i+1].idx : big.length);
@@ -394,60 +416,105 @@
       }
     });
 
-    // 3) Collect ALL steel blocks globally in the text
-    const steelBlocks = [];
-    const steelBlockRegex =
-      /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)[\s\S]*?Steel\s*value\s*:\s*([\d.,]+)/gi;
-    let sbMatch;
-    while((sbMatch = steelBlockRegex.exec(big)) !== null){
-      steelBlocks.push({
-        idx: sbMatch.index,
-        steelKG: parseNum(sbMatch[1]),
-        steelVal: parseNum(sbMatch[2])
+    // 3) Collect steel/other blocks and assign to items by net + value
+    const steelInfo = items.map(()=>({ steelKG:NaN, steelVal:NaN }));
+    const usedBlockIdx = new Set();
+
+    const blockRegex = /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)\s*Net\s*weight\s*in\s*kg\s*in\s*other\s*:\s*([\d.,]+)\s*Steel\s*value\s*:\s*([\d.,]+)\s*Other\s*value\s*:\s*([\d.,]+)/gi;
+    let mb;
+    while((mb = blockRegex.exec(big)) !== null){
+      const blockIdx = mb.index;
+      const steelKG = parseNum(mb[1]);
+      const otherKG = parseNum(mb[2]);
+      const steelVal = parseNum(mb[3]);
+      const otherVal = parseNum(mb[4]);
+
+      const blockNet = (isFinite(steelKG)?steelKG:0) + (isFinite(otherKG)?otherKG:0);
+      const blockVal = (isFinite(steelVal)?steelVal:0) + (isFinite(otherVal)?otherVal:0);
+
+      if(!isFinite(blockNet) || !isFinite(blockVal)) continue;
+
+      let bestIdx = -1;
+      let bestScore = Infinity;
+
+      items.forEach((it, i)=>{
+        const baseNet = meta[i].baseNetkg;
+        const baseVal = it.lineTotal;
+        if(!isFinite(baseNet) || !isFinite(baseVal)) return;
+
+        const netDiff = Math.abs(baseNet - blockNet);
+        const valDiff = Math.abs(baseVal - blockVal);
+        const netRel = netDiff / Math.max(Math.abs(baseNet), Math.abs(blockNet), 1);
+        const valRel = valDiff / Math.max(Math.abs(baseVal), Math.abs(blockVal), 1);
+
+        // require both net and value to be reasonably close (1% tolerance)
+        if(netRel > 0.01 || valRel > 0.01) return;
+
+        const dist = Math.abs(blockIdx - it.idx);
+        const score = netRel + valRel + dist / 1000000; // tiny tie-breaker on distance
+        if(score < bestScore){
+          bestScore = score;
+          bestIdx = i;
+        }
       });
+
+      if(bestIdx >= 0){
+        usedBlockIdx.add(blockIdx);
+        const info = steelInfo[bestIdx];
+        if(isFinite(steelKG)){
+          info.steelKG = isFinite(info.steelKG) ? (info.steelKG + steelKG) : steelKG;
+        }
+        if(isFinite(steelVal)){
+          info.steelVal = isFinite(info.steelVal) ? (info.steelVal + steelVal) : steelVal;
+        }
+      }
     }
 
-    // 4) Assign steel blocks to items by net weight + text order
-    const steelForItem = items.map(()=>({ steelKG: NaN, steelVal: NaN }));
-    const REL_THRESHOLD = 0.6; // up to 60% relative difference allowed
+    // 4) Fallback for "steel only" blocks without explicit "other" (avoid ones we already used)
+    const steelOnlyRegex =
+      /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)[\s\S]{0,120}?Steel\s*value\s*:\s*([\d.,]+)/gi;
+    let so;
+    while((so = steelOnlyRegex.exec(big)) !== null){
+      const idx = so.index;
+      // skip if this start is already part of an assigned full block
+      if(usedBlockIdx.has(idx)) continue;
 
-    steelBlocks.forEach(block=>{
-      const {steelKG, steelVal, idx: steelIdx} = block;
-      if(!isFinite(steelKG) && !isFinite(steelVal)) return;
+      const steelKG = parseNum(so[1]);
+      const steelVal = parseNum(so[2]);
+      if(!isFinite(steelKG) && !isFinite(steelVal)) continue;
 
-      let bestItem = -1;
-      let bestDiffRel = Infinity;
+      let bestIdx = -1;
+      let bestRel = Infinity;
       let bestDist = Infinity;
 
       items.forEach((it, i)=>{
         const baseNet = meta[i].baseNetkg;
         if(!isFinite(baseNet)) return;
-        if(steelIdx <= it.idx) return; // steel block must appear after the item
+        if(idx <= it.idx) return; // should follow the item
 
-        const diffRel = Math.abs(steelKG - baseNet) / Math.max(Math.abs(steelKG), Math.abs(baseNet), 1);
-        if(diffRel > REL_THRESHOLD) return;
+        const netRel = Math.abs(baseNet - steelKG) / Math.max(Math.abs(baseNet), Math.abs(steelKG), 1);
+        if(netRel > 0.6) return; // only accept somewhat similar weights
 
-        const dist = steelIdx - it.idx;
-        if(diffRel < bestDiffRel - 1e-9 ||
-           (Math.abs(diffRel - bestDiffRel) < 1e-9 && dist < bestDist)){
-          bestDiffRel = diffRel;
+        const dist = idx - it.idx;
+        if(netRel < bestRel - 1e-9 || (Math.abs(netRel - bestRel) < 1e-9 && dist < bestDist)){
+          bestRel = netRel;
           bestDist = dist;
-          bestItem = i;
+          bestIdx = i;
         }
       });
 
-      if(bestItem >= 0){
-        const t = steelForItem[bestItem];
+      if(bestIdx >= 0){
+        const info = steelInfo[bestIdx];
         if(isFinite(steelKG)){
-          t.steelKG = isFinite(t.steelKG) ? (t.steelKG + steelKG) : steelKG;
+          info.steelKG = isFinite(info.steelKG) ? (info.steelKG + steelKG) : steelKG;
         }
         if(isFinite(steelVal)){
-          t.steelVal = isFinite(t.steelVal) ? (t.steelVal + steelVal) : steelVal;
+          info.steelVal = isFinite(info.steelVal) ? (info.steelVal + steelVal) : steelVal;
         }
       }
-    });
+    }
 
-    // 5) If no items, still push a placeholder
+    // 5) If no items, still push a placeholder for the invoice
     if(!items.length){
       ALL.push({
         invoice_number:invNum, invoice_date:invDate, supplier, invoice_total:invTotal,
@@ -457,21 +524,22 @@
       return;
     }
 
-    // 6) Final pass: build ALL rows (base + steel S-lines)
+    // 6) Build ALL rows (base + steel S-lines, clamped so steelVal ≤ original line total)
     items.forEach((it, i)=>{
       const pos = (i+1).toString();
       const baseNetkg = meta[i].baseNetkg;
       const netkgStr  = meta[i].netkgStr;
       const coo       = meta[i].coo;
+      const baseVal   = it.lineTotal;
 
       const unitPrice =
         (isFinite(it.unitPricePer) && isFinite(it.perDivisor) && it.perDivisor>0)
           ? (it.unitPricePer / it.perDivisor)
           : '';
 
-      const origLineTotal = isFinite(it.lineTotal) ? fmt2(it.lineTotal) : '';
+      const origLineTotal = isFinite(baseVal) ? fmt2(baseVal) : '';
 
-      // Base line: keep original invoice total; steel adjustments happen later
+      // Base line
       ALL.push({
         invoice_number: invNum,
         invoice_date:  invDate,
@@ -488,11 +556,19 @@
         country_of_origin: coo
       });
 
-      // Steel S-line if we have a steel value
-      const sInfo = steelForItem[i];
-      const sVal  = sInfo.steelVal;
-      const sKG   = sInfo.steelKG;
-      if(isFinite(sVal) && sVal>0){
+      // Steel S-line if we have a value
+      let sInfo = steelInfo[i];
+      let sVal  = sInfo.steelVal;
+      let sKG   = sInfo.steelKG;
+
+      if(isFinite(sVal) && sVal > 0){
+        // Clamp so steel value never exceeds original line total
+        if(isFinite(baseVal) && baseVal > 0 && sVal > baseVal){
+          const ratio = baseVal / sVal;
+          sVal = baseVal;
+          if(isFinite(sKG)) sKG = sKG * ratio;
+        }
+
         ALL.push({
           invoice_number: invNum,
           invoice_date:  invDate,
@@ -532,6 +608,8 @@
       };
       metaInv[r.invoice_number].count++;
     });
+
+    ORDER = Array.from(new Set(ALL.map(r=>r.invoice_number)));
     ORDER.forEach(id=>{
       const m = metaInv[id]||{date:'',supplier:'',total:'',count:0};
       const opt = document.createElement('option');
@@ -547,9 +625,9 @@
     };
     UI.exportBtn.onclick = exportToDescartes;
 
-    CURRENT = ORDER[0];
+    if(!CURRENT) CURRENT = ORDER[0];
     UI.invSel.value = CURRENT;
-    renderInvoice(CURRENT);
+    if(CURRENT) renderInvoice(CURRENT);
 
     UI.invSel.tabIndex = 1;
     UI.supplierInp.tabIndex = 2;
@@ -588,9 +666,9 @@
     UI.stats.style.display='grid';
     recomputeStats();
 
-    UI.supplierInp.onchange = e=> updateHdr('supplier', e.target.value);
-    UI.dateInp.onchange     = e=> updateHdr('invoice_date', e.target.value);
-    UI.totalInp.onchange    = e=> { updateHdr('invoice_total', e.target.value); recomputeStats(); };
+    UI.supplierInp.onchange = e=> { pushUndo(); updateHdr('supplier', e.target.value); };
+    UI.dateInp.onchange     = e=> { pushUndo(); updateHdr('invoice_date', e.target.value); };
+    UI.totalInp.onchange    = e=> { pushUndo(); updateHdr('invoice_total', e.target.value); recomputeStats(); };
 
     rebuildTabOrder();
   }
@@ -605,7 +683,10 @@
         inp.className='readonly';
         inp.readOnly=true;
       }
-      inp.onchange = ()=> updateCell(idx, key, inp.value);
+      inp.onchange = ()=>{
+        pushUndo();
+        updateCell(idx, key, inp.value);
+      };
       inp.onkeydown = ev=>{
         if(ev.key==='Enter' || ev.key==='Tab'){
           ev.preventDefault();
@@ -620,11 +701,11 @@
     const add = document.createElement('button');
     add.className='btn add';
     add.textContent='➕ Below';
-    add.onclick=()=> addBelow(idx);
+    add.onclick=()=> { pushUndo(); addBelow(idx); };
     const del = document.createElement('button');
     del.className='btn del';
     del.textContent='🗑️';
-    del.onclick=()=> removeRow(idx);
+    del.onclick=()=> { pushUndo(); removeRow(idx); };
     actions.appendChild(add);
     actions.appendChild(del);
 
@@ -757,7 +838,7 @@
     });
   }
 
-  // ======= Descartes export =======
+  // ======= Descartes export (unchanged shape) =======
   function exportToDescartes(){
     if(!ALL.length){
       showAlert('No data to export', false);
