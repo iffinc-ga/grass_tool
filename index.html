@@ -324,7 +324,8 @@
     e.preventDefault();
     UI.drop.style.background='#f1f5ff';
   });
-  UI.drop.addEventListener('dragleave', ()=> UI.drop.style.background='');
+  UI.drop.addEventListener('dragleave', ()=> UI.drop.style.background='';
+  );
   UI.drop.addEventListener('drop', e=>{
     e.preventDefault();
     UI.drop.style.background='';
@@ -658,6 +659,7 @@
     UI.invSel.value = CURRENT;
     if(CURRENT) renderInvoice(CURRENT);
 
+    // Header/tab order
     UI.invSel.tabIndex = 1;
     UI.supplierInp.tabIndex = 2;
     UI.dateInp.tabIndex = 3;
@@ -716,8 +718,9 @@
         pushUndo();
         updateCell(idx, key, inp.value);
       };
+      // ENTER advances to next field; TAB is left to browser for natural tabbing
       inp.onkeydown = ev=>{
-        if(ev.key==='Enter' || ev.key==='Tab'){
+        if(ev.key==='Enter'){
           ev.preventDefault();
           focusNext(inp, ev.shiftKey?-1:1);
         }
@@ -950,25 +953,35 @@
     return fallback || alnum || '';
   }
 
-  function lookupTariffs(basePartNum){
+  // NEW: use full parsed part number, with fallback to base part
+  function lookupTariffsByPart(partNumber){
     if(!grassDb || !grassDb.length) return [];
-    const part = grassDb.find(row => String(row['PRIMARY PART NUM']) === basePartNum);
-    if(!part) return [];
-    const tariffs = [];
-    
-    // Check TARIFF NUM column first
-    if(part['TARIFF NUM']){
-      const tariffStr = String(part['TARIFF NUM']).replace(/\.0$/, '');
-      tariffs.push(tariffStr);
+    const full = String(partNumber || '').trim();
+    let partRow = null;
+
+    if(full){
+      partRow = grassDb.find(row => String(row['PRIMARY PART NUM'] ?? '').trim() === full);
     }
-    
-    // Then check TARIFF NUM_1 through TARIFF NUM_5
-    for(let i=1; i<=5; i++){
-      const col = `TARIFF NUM_${i}`;
-      if(part[col]){
-        const tariffStr = String(part[col]).replace(/\.0$/, '');
-        tariffs.push(tariffStr);
+    if(!partRow){
+      const base = extractBasePartNumber(full);
+      if(base){
+        partRow = grassDb.find(row => String(row['PRIMARY PART NUM'] ?? '').trim() === base);
       }
+    }
+    if(!partRow) return [];
+
+    const tariffs = [];
+    const addTariff = v => {
+      if(v !== undefined && v !== null && v !== ''){
+        const tariffStr = String(v).replace(/\.0$/, '');
+        if(tariffStr) tariffs.push(tariffStr);
+      }
+    };
+
+    // TARIFF NUM + TARIFF NUM_1.._5
+    addTariff(partRow['TARIFF NUM']);
+    for(let i=1; i<=5; i++){
+      addTariff(partRow[`TARIFF NUM_${i}`]);
     }
     return tariffs;
   }
@@ -1047,8 +1060,8 @@
         const parentItem = items.find(it => it.invoice_number===item.invoice_number && it.position === parentPos);
         let tariffForSubline = null;
         if (parentItem) {
-          const parentBase = extractBasePartNumber(parentItem.part_number);
-          const parentTariffs = lookupTariffs(parentBase);
+          // use FULL parent part number for tariff lookup (with fallback to base)
+          const parentTariffs = lookupTariffsByPart(parentItem.part_number);
           tariffForSubline = parentTariffs.find(t => !String(t).startsWith('98') && !String(t).startsWith('99')) || null;
         }
         const subNum = tariffForSubline
@@ -1157,8 +1170,8 @@
 
       // Tariff lookups for non-steel/aluminum lines
       if (!isSteelLine && !isAlumLine) {
-        const basePartNum = extractBasePartNumber(item.part_number);
-        const tariffs = lookupTariffs(basePartNum);
+        // use FULL parsed part number for DB match (fallback to base inside helper)
+        const tariffs = lookupTariffsByPart(item.part_number);
         const tariffFields = ['TariffNumber', 'SecondaryTariffNumber', 'ThirdTariffNumber', '4TariffNumber', '5TariffNumber'];
 
         tariffs.forEach((tariff, idx) => {
