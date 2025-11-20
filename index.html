@@ -65,7 +65,7 @@
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Grass Invoice PDF Parser (OIA)</h1>
+      <h1>Grass Invoice PDF Parser (Steel-only + Undo)</h1>
       <p>Only steel sublines are kept. Base line total = original invoice total − sum of steel sublines.</p>
     </div>
 
@@ -293,6 +293,7 @@
 
   // Undo stack
   function pushUndo(){
+    // Deep copy ALL; limit history to last 50 steps
     undoStack.push(JSON.parse(JSON.stringify(ALL)));
     if(undoStack.length > 50) undoStack.shift();
   }
@@ -323,9 +324,7 @@
     e.preventDefault();
     UI.drop.style.background='#f1f5ff';
   });
-  UI.drop.addEventListener('dragleave', ()=>{
-    UI.drop.style.background='';
-  });
+  UI.drop.addEventListener('dragleave', ()=> UI.drop.style.background='');
   UI.drop.addEventListener('drop', e=>{
     e.preventDefault();
     UI.drop.style.background='';
@@ -343,7 +342,7 @@
     filename = file.name.replace(/\.pdf$/i,'');
     UI.upload.style.display='none';
     UI.loading.style.display='block';
-    undoStack = [];
+    undoStack = [];  // reset undo history
 
     try{
       const buf = new Uint8Array(await file.arrayBuffer());
@@ -391,6 +390,7 @@
     ORDER.length = 0;
     const big = String(text||'');
 
+    // Invoice meta (assume single consolidated invoice number)
     const invm = [...big.matchAll(/Invoice\s+(\d{5,})/gi)];
     const invNum = invm.length? invm[0][1] : 'UNKNOWN';
     if(!ORDER.includes(invNum)) ORDER.push(invNum);
@@ -407,6 +407,7 @@
     const tm = big.match(/Total\s+Amount\s+([\d.,]+)\s+USD/i);
     if(tm) invTotal = String(parseNum(tm[1])||'');
 
+    // 1) Find all base items
     const itemRegex =
       /\b(F[0-9]{9,})\s+(\d+[\d.,]*)\s+(PCS|PC|SET|PAIRS?)\s+([\d.,]+)\s*\/\s*(\d+)\s+([\d.,]+)\s+USD/gi;
     const items = [];
@@ -423,6 +424,7 @@
       });
     }
 
+    // 2) Precompute base meta: net weight, COO
     const meta = items.map(()=>({ baseNetkg: NaN, netkgStr:'', coo:'' }));
     items.forEach((it, i)=>{
       const start = it.idx;
@@ -443,6 +445,7 @@
       }
     });
 
+    // 3) Collect steel/other blocks and assign to items by net + value
     const steelInfo = items.map(()=>({ steelKG:NaN, steelVal:NaN }));
     const usedBlockIdx = new Set();
 
@@ -473,10 +476,11 @@
         const netRel = netDiff / Math.max(Math.abs(baseNet), Math.abs(blockNet), 1);
         const valRel = valDiff / Math.max(Math.abs(baseVal), Math.abs(blockVal), 1);
 
+        // require both net and value to be reasonably close (1% tolerance)
         if(netRel > 0.01 || valRel > 0.01) return;
 
         const dist = Math.abs(blockIdx - it.idx);
-        const score = netRel + valRel + dist / 1000000;
+        const score = netRel + valRel + dist / 1000000; // tiny tie-breaker on distance
         if(score < bestScore){
           bestScore = score;
           bestIdx = i;
@@ -495,11 +499,13 @@
       }
     }
 
+    // 4) Fallback for "steel only" blocks without explicit "other" (avoid ones we already used)
     const steelOnlyRegex =
       /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)[\s\S]{0,120}?Steel\s*value\s*:\s*([\d.,]+)/gi;
     let so;
     while((so = steelOnlyRegex.exec(big)) !== null){
       const idx = so.index;
+      // skip if this start is already part of an assigned full block
       if(usedBlockIdx.has(idx)) continue;
 
       const steelKG = parseNum(so[1]);
@@ -513,10 +519,10 @@
       items.forEach((it, i)=>{
         const baseNet = meta[i].baseNetkg;
         if(!isFinite(baseNet)) return;
-        if(idx <= it.idx) return;
+        if(idx <= it.idx) return; // should follow the item
 
         const netRel = Math.abs(baseNet - steelKG) / Math.max(Math.abs(baseNet), Math.abs(steelKG), 1);
-        if(netRel > 0.6) return;
+        if(netRel > 0.6) return; // only accept somewhat similar weights
 
         const dist = idx - it.idx;
         if(netRel < bestRel - 1e-9 || (Math.abs(netRel - bestRel) < 1e-9 && dist < bestDist)){
@@ -537,6 +543,7 @@
       }
     }
 
+    // 5) If no items, still push a placeholder for the invoice
     if(!items.length){
       ALL.push({
         invoice_number:invNum, invoice_date:invDate, supplier, invoice_total:invTotal,
@@ -546,6 +553,7 @@
       return;
     }
 
+    // 6) Build ALL rows (base + steel S-lines, clamped so steelVal ≤ original line total)
     items.forEach((it, i)=>{
       const pos = (i+1).toString();
       const baseNetkg = meta[i].baseNetkg;
@@ -560,6 +568,7 @@
 
       const origLineTotal = isFinite(baseVal) ? fmt2(baseVal) : '';
 
+      // Base line
       ALL.push({
         invoice_number: invNum,
         invoice_date:  invDate,
@@ -576,11 +585,13 @@
         country_of_origin: coo
       });
 
+      // Steel S-line if we have a value
       let sInfo = steelInfo[i];
       let sVal  = sInfo.steelVal;
       let sKG   = sInfo.steelKG;
 
       if(isFinite(sVal) && sVal > 0){
+        // Clamp so steel value never exceeds original line total
         if(isFinite(baseVal) && baseVal > 0 && sVal > baseVal){
           const ratio = baseVal / sVal;
           sVal = baseVal;
@@ -604,31 +615,6 @@
         });
       }
     });
-  }
-
-  // ======= Keyboard navigation helpers (Tab + Enter) =======
-  function focusNext(current, dir){
-    const inputs = [
-      UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp,
-      ...$$('#rows input')
-    ].filter(Boolean);
-    const idx = inputs.indexOf(current);
-    const nextIdx = Math.max(0, Math.min(inputs.length-1, idx + (dir||1)));
-    const target = inputs[nextIdx];
-    if(target){
-      target.focus();
-      if(target.select) target.select();
-    }
-  }
-
-  function attachNavHandlers(inp){
-    if(!inp) return;
-    inp.onkeydown = ev=>{
-      if(ev.key === 'Enter' || ev.key === 'Tab'){
-        ev.preventDefault();
-        focusNext(inp, ev.shiftKey ? -1 : 1);
-      }
-    };
   }
 
   // ======= UI building & editing =======
@@ -672,15 +658,10 @@
     UI.invSel.value = CURRENT;
     if(CURRENT) renderInvoice(CURRENT);
 
-    // Header/tab order + keyboard nav
     UI.invSel.tabIndex = 1;
     UI.supplierInp.tabIndex = 2;
     UI.dateInp.tabIndex = 3;
     UI.totalInp.tabIndex = 4;
-    attachNavHandlers(UI.invSel);
-    attachNavHandlers(UI.supplierInp);
-    attachNavHandlers(UI.dateInp);
-    attachNavHandlers(UI.totalInp);
   }
 
   function sortedRowsForCurrent(){
@@ -735,7 +716,12 @@
         pushUndo();
         updateCell(idx, key, inp.value);
       };
-      attachNavHandlers(inp);
+      inp.onkeydown = ev=>{
+        if(ev.key==='Enter' || ev.key==='Tab'){
+          ev.preventDefault();
+          focusNext(inp, ev.shiftKey?-1:1);
+        }
+      };
       td.appendChild(inp);
       return td;
     }
@@ -767,6 +753,20 @@
   function rebuildTabOrder(){
     let ti = 10;
     $$('#rows input').forEach(inp=>{ inp.tabIndex = ti++; });
+  }
+
+  function focusNext(current, dir){
+    const inputs = [
+      UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp,
+      ...$$('#rows input')
+    ].filter(Boolean);
+    const idx = inputs.indexOf(current);
+    const nextIdx = Math.max(0, Math.min(inputs.length-1, idx + (dir||1)));
+    const target = inputs[nextIdx];
+    if(target){
+      target.focus();
+      if(target.select) target.select();
+    }
   }
 
   function updateCell(viewIdx, key, val){
@@ -803,16 +803,6 @@
     ALL.splice(idx+1, 0, insert);
     applySteelAdjustments(CURRENT);
     renderInvoice(CURRENT);
-
-    // After re-render, focus the POS cell of the newly added row
-    const inputs = $$('#rows input');
-    if(inputs.length){
-      const lastPosInput = inputs[inputs.length - 9]; // each row has 8 inputs; POS is first of the row
-      if(lastPosInput){
-        lastPosInput.focus();
-        lastPosInput.select && lastPosInput.select();
-      }
-    }
   }
 
   function removeRow(viewIdx){
@@ -960,34 +950,25 @@
     return fallback || alnum || '';
   }
 
-  // use full parsed part number, with fallback to base part
-  function lookupTariffsByPart(partNumber){
+  function lookupTariffs(basePartNum){
     if(!grassDb || !grassDb.length) return [];
-    const full = String(partNumber || '').trim();
-    let partRow = null;
-
-    if(full){
-      partRow = grassDb.find(row => String(row['PRIMARY PART NUM'] ?? '').trim() === full);
-    }
-    if(!partRow){
-      const base = extractBasePartNumber(full);
-      if(base){
-        partRow = grassDb.find(row => String(row['PRIMARY PART NUM'] ?? '').trim() === base);
-      }
-    }
-    if(!partRow) return [];
-
+    const part = grassDb.find(row => String(row['PRIMARY PART NUM']) === basePartNum);
+    if(!part) return [];
     const tariffs = [];
-    const addTariff = v => {
-      if(v !== undefined && v !== null && v !== ''){
-        const tariffStr = String(v).replace(/\.0$/, '');
-        if(tariffStr) tariffs.push(tariffStr);
-      }
-    };
-
-    addTariff(partRow['TARIFF NUM']);
+    
+    // Check TARIFF NUM column first
+    if(part['TARIFF NUM']){
+      const tariffStr = String(part['TARIFF NUM']).replace(/\.0$/, '');
+      tariffs.push(tariffStr);
+    }
+    
+    // Then check TARIFF NUM_1 through TARIFF NUM_5
     for(let i=1; i<=5; i++){
-      addTariff(partRow[`TARIFF NUM_${i}`]);
+      const col = `TARIFF NUM_${i}`;
+      if(part[col]){
+        const tariffStr = String(part[col]).replace(/\.0$/, '');
+        tariffs.push(tariffStr);
+      }
     }
     return tariffs;
   }
@@ -995,7 +976,7 @@
   function lookupHtsUom(htsCode){
     if(!htsCodesDb || !htsCodesDb.length) return {uom1: '', uom2: ''};
     const hts = htsCodesDb.find(row => String(row['HTS Code']) === String(htsCode));
-    if(!hts) return {uom1: '', uom2: '' };
+    if(!hts) return {uom1: '', uom2: ''};
     return { uom1: hts['UOM1'] || '', uom2: hts['UOM2'] || '' };
   }
 
@@ -1015,7 +996,7 @@
     return '';
   }
 
-  // ======= Descartes export =======
+  // ======= Descartes export with enhanced functionality =======
   function exportToDescartes(){
     if(!ALL.length){
       showAlert('No data to export', false);
@@ -1058,15 +1039,16 @@
 
       let buyerPartNum, supplierPartNum;
       if (!isSteelLine && !isAlumLine) {
-        // *** CHANGE: use full parsed part number in the template ***
-        buyerPartNum = item.part_number || '';
-        supplierPartNum = item.part_number || '';
+        const basePart = extractBasePartNumber(item.part_number);
+        buyerPartNum = basePart;
+        supplierPartNum = basePart;
       } else {
         const parentPos = String(item.position||'').replace(/[SA]$/,'');
         const parentItem = items.find(it => it.invoice_number===item.invoice_number && it.position === parentPos);
         let tariffForSubline = null;
         if (parentItem) {
-          const parentTariffs = lookupTariffsByPart(parentItem.part_number);
+          const parentBase = extractBasePartNumber(parentItem.part_number);
+          const parentTariffs = lookupTariffs(parentBase);
           tariffForSubline = parentTariffs.find(t => !String(t).startsWith('98') && !String(t).startsWith('99')) || null;
         }
         const subNum = tariffForSubline
@@ -1168,12 +1150,15 @@
         '5 Value': ''
       };
 
+      // Special handling for steel/aluminum sublines
       if (isSteelLine || isAlumLine) {
         row['NetWeight'] = roundWeight(item.quantity);
       }
 
+      // Tariff lookups for non-steel/aluminum lines
       if (!isSteelLine && !isAlumLine) {
-        const tariffs = lookupTariffsByPart(item.part_number);
+        const basePartNum = extractBasePartNumber(item.part_number);
+        const tariffs = lookupTariffs(basePartNum);
         const tariffFields = ['TariffNumber', 'SecondaryTariffNumber', 'ThirdTariffNumber', '4TariffNumber', '5TariffNumber'];
 
         tariffs.forEach((tariff, idx) => {
@@ -1208,6 +1193,7 @@
         });
       }
 
+      // Override tariffs for steel lines
       if (isSteelLine) {
         row['TariffNumber'] = '99030133';
         row['SecondaryTariffNumber'] = '99038191';
@@ -1215,6 +1201,7 @@
         row['Secondaryunitofmeasure1'] = 'KG';
       }
 
+      // Override tariffs for aluminum lines
       if (isAlumLine) {
         row['TariffNumber'] = '99030133';
         row['SecondaryTariffNumber'] = '99038508';
