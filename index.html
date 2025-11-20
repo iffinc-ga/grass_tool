@@ -65,7 +65,7 @@
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Grass Invoice PDF Parser (Steel-only + Undo)</h1>
+      <h1>Grass Invoice PDF Parser</h1>
       <p>Only steel sublines are kept. Base line total = original invoice total − sum of steel sublines.</p>
     </div>
 
@@ -149,17 +149,15 @@
   };
 
   let ALL = [], ORDER = [], CURRENT = '', filename = '';
-  let grassDb = []; // populated from updated_grass_db.xlsx when available
-  let htsCodesDb = []; // populated from hts_codes_with_uom sheet
-  let steelAlumDb = []; // populated from Sheet1
-  let supplierMidDb = []; // populated from MID sheet
-  let supplierMidIndex = []; // built from supplierMidDb
+  let grassDb = [], htsCodesDb = [], steelAlumDb = [];
+  let supplierMidDb = [], supplierMidIndex = [];
   let undoStack = [];
+  let pendingFocusPos = null;   // which POS to focus after re-render (for Add Below)
 
-  // ======= DB loader for updated_grass_db.xlsx =======
+  // ===== DB loader =====
   const GITHUB_CONFIG = {
     owner: 'iffinc-ga',
-    repo:  'all_in_one_manki',   // adjust if needed
+    repo:  'all_in_one_manki',
     branch:'main',
     filePath: 'updated_grass_db.xlsx'
   };
@@ -194,26 +192,22 @@
   }
 
   async function hydrateDbFromWorkbook(workbook){
-    // Load GRASS_DB sheet
     const grassSheetName =
       workbook.SheetNames.find(n => n.toLowerCase().includes('grass')) ||
       workbook.SheetNames[0];
     grassDb = XLSX.utils.sheet_to_json(workbook.Sheets[grassSheetName], {defval:''});
     console.log(`[DB] Loaded ${grassSheetName}: ${grassDb.length} rows`);
 
-    // Load hts_codes_with_uom sheet
     if(workbook.SheetNames.includes('hts_codes_with_uom')){
       htsCodesDb = XLSX.utils.sheet_to_json(workbook.Sheets['hts_codes_with_uom']);
       console.log(`[DB] Loaded hts_codes_with_uom: ${htsCodesDb.length} rows`);
     }
 
-    // Load Sheet1 (steel/aluminum mappings)
     if(workbook.SheetNames.includes('Sheet1')){
       steelAlumDb = XLSX.utils.sheet_to_json(workbook.Sheets['Sheet1']);
       console.log(`[DB] Loaded Sheet1: ${steelAlumDb.length} rows`);
     }
 
-    // Load MID sheet
     if(workbook.SheetNames.includes('MID')){
       supplierMidDb = XLSX.utils.sheet_to_json(workbook.Sheets['MID'], {defval:''});
       buildSupplierMidIndex();
@@ -261,7 +255,7 @@
   offlineDbBtn?.addEventListener('click', ()=> enterOfflineMode('Offline mode selected by user.'));
   window.addEventListener('DOMContentLoaded', ()=>{ loadDatabaseFromGitHub().catch(()=>{}); });
 
-  // ======= Utility helpers =======
+  // ===== Utility helpers =====
   function showAlert(msg, ok=true){
     UI.alert.className = 'alert ' + (ok?'ok':'err');
     UI.alert.textContent = msg;
@@ -291,9 +285,7 @@
   };
   const sumLines = list => list.reduce((a,r)=> a + (parseNum(r.line_total)||0), 0);
 
-  // Undo stack
   function pushUndo(){
-    // Deep copy ALL; limit history to last 50 steps
     undoStack.push(JSON.parse(JSON.stringify(ALL)));
     if(undoStack.length > 50) undoStack.shift();
   }
@@ -314,7 +306,7 @@
     buildUI();
   }
 
-  // ======= File handling =======
+  // ===== File handling =====
   UI.drop.addEventListener('click', ()=> UI.file.click());
   UI.file.addEventListener('change', e=>{
     const f=e.target.files?.[0];
@@ -324,7 +316,9 @@
     e.preventDefault();
     UI.drop.style.background='#f1f5ff';
   });
-  UI.drop.addEventListener('dragleave', ()=> UI.drop.style.background='');
+  UI.drop.addEventListener('dragleave', ()=>{
+    UI.drop.style.background='';
+  });
   UI.drop.addEventListener('drop', e=>{
     e.preventDefault();
     UI.drop.style.background='';
@@ -342,7 +336,7 @@
     filename = file.name.replace(/\.pdf$/i,'');
     UI.upload.style.display='none';
     UI.loading.style.display='block';
-    undoStack = [];  // reset undo history
+    undoStack = [];
 
     try{
       const buf = new Uint8Array(await file.arrayBuffer());
@@ -384,13 +378,12 @@
     }
   }
 
-  // ======= Core Grass parsing (steel blocks matched by net weight + value) =======
+  // ===== Core Grass parsing (with steel mapping) =====
   function parseGrass(text){
     ALL.length = 0;
     ORDER.length = 0;
     const big = String(text||'');
 
-    // Invoice meta (assume single consolidated invoice number)
     const invm = [...big.matchAll(/Invoice\s+(\d{5,})/gi)];
     const invNum = invm.length? invm[0][1] : 'UNKNOWN';
     if(!ORDER.includes(invNum)) ORDER.push(invNum);
@@ -407,7 +400,6 @@
     const tm = big.match(/Total\s+Amount\s+([\d.,]+)\s+USD/i);
     if(tm) invTotal = String(parseNum(tm[1])||'');
 
-    // 1) Find all base items
     const itemRegex =
       /\b(F[0-9]{9,})\s+(\d+[\d.,]*)\s+(PCS|PC|SET|PAIRS?)\s+([\d.,]+)\s*\/\s*(\d+)\s+([\d.,]+)\s+USD/gi;
     const items = [];
@@ -424,7 +416,6 @@
       });
     }
 
-    // 2) Precompute base meta: net weight, COO
     const meta = items.map(()=>({ baseNetkg: NaN, netkgStr:'', coo:'' }));
     items.forEach((it, i)=>{
       const start = it.idx;
@@ -445,11 +436,11 @@
       }
     });
 
-    // 3) Collect steel/other blocks and assign to items by net + value
     const steelInfo = items.map(()=>({ steelKG:NaN, steelVal:NaN }));
     const usedBlockIdx = new Set();
 
-    const blockRegex = /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)\s*Net\s*weight\s*in\s*kg\s*in\s*other\s*:\s*([\d.,]+)\s*Steel\s*value\s*:\s*([\d.,]+)\s*Other\s*value\s*:\s*([\d.,]+)/gi;
+    const blockRegex =
+      /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)\s*Net\s*weight\s*in\s*kg\s*in\s*other\s*:\s*([\d.,]+)\s*Steel\s*value\s*:\s*([\d.,]+)\s*Other\s*value\s*:\s*([\d.,]+)/gi;
     let mb;
     while((mb = blockRegex.exec(big)) !== null){
       const blockIdx = mb.index;
@@ -460,7 +451,6 @@
 
       const blockNet = (isFinite(steelKG)?steelKG:0) + (isFinite(otherKG)?otherKG:0);
       const blockVal = (isFinite(steelVal)?steelVal:0) + (isFinite(otherVal)?otherVal:0);
-
       if(!isFinite(blockNet) || !isFinite(blockVal)) continue;
 
       let bestIdx = -1;
@@ -475,12 +465,10 @@
         const valDiff = Math.abs(baseVal - blockVal);
         const netRel = netDiff / Math.max(Math.abs(baseNet), Math.abs(blockNet), 1);
         const valRel = valDiff / Math.max(Math.abs(baseVal), Math.abs(blockVal), 1);
-
-        // require both net and value to be reasonably close (1% tolerance)
         if(netRel > 0.01 || valRel > 0.01) return;
 
         const dist = Math.abs(blockIdx - it.idx);
-        const score = netRel + valRel + dist / 1000000; // tiny tie-breaker on distance
+        const score = netRel + valRel + dist / 1_000_000;
         if(score < bestScore){
           bestScore = score;
           bestIdx = i;
@@ -499,13 +487,11 @@
       }
     }
 
-    // 4) Fallback for "steel only" blocks without explicit "other" (avoid ones we already used)
     const steelOnlyRegex =
       /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)[\s\S]{0,120}?Steel\s*value\s*:\s*([\d.,]+)/gi;
     let so;
     while((so = steelOnlyRegex.exec(big)) !== null){
       const idx = so.index;
-      // skip if this start is already part of an assigned full block
       if(usedBlockIdx.has(idx)) continue;
 
       const steelKG = parseNum(so[1]);
@@ -519,10 +505,10 @@
       items.forEach((it, i)=>{
         const baseNet = meta[i].baseNetkg;
         if(!isFinite(baseNet)) return;
-        if(idx <= it.idx) return; // should follow the item
+        if(idx <= it.idx) return;
 
         const netRel = Math.abs(baseNet - steelKG) / Math.max(Math.abs(baseNet), Math.abs(steelKG), 1);
-        if(netRel > 0.6) return; // only accept somewhat similar weights
+        if(netRel > 0.6) return;
 
         const dist = idx - it.idx;
         if(netRel < bestRel - 1e-9 || (Math.abs(netRel - bestRel) < 1e-9 && dist < bestDist)){
@@ -543,7 +529,6 @@
       }
     }
 
-    // 5) If no items, still push a placeholder for the invoice
     if(!items.length){
       ALL.push({
         invoice_number:invNum, invoice_date:invDate, supplier, invoice_total:invTotal,
@@ -553,7 +538,6 @@
       return;
     }
 
-    // 6) Build ALL rows (base + steel S-lines, clamped so steelVal ≤ original line total)
     items.forEach((it, i)=>{
       const pos = (i+1).toString();
       const baseNetkg = meta[i].baseNetkg;
@@ -568,7 +552,6 @@
 
       const origLineTotal = isFinite(baseVal) ? fmt2(baseVal) : '';
 
-      // Base line
       ALL.push({
         invoice_number: invNum,
         invoice_date:  invDate,
@@ -585,13 +568,11 @@
         country_of_origin: coo
       });
 
-      // Steel S-line if we have a value
       let sInfo = steelInfo[i];
       let sVal  = sInfo.steelVal;
       let sKG   = sInfo.steelKG;
 
       if(isFinite(sVal) && sVal > 0){
-        // Clamp so steel value never exceeds original line total
         if(isFinite(baseVal) && baseVal > 0 && sVal > baseVal){
           const ratio = baseVal / sVal;
           sVal = baseVal;
@@ -617,7 +598,33 @@
     });
   }
 
-  // ======= UI building & editing =======
+  // ===== Keyboard navigation helpers =====
+  function focusNext(current, dir){
+    const inputs = [
+      UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp,
+      ...$$('#rows input')
+    ].filter(Boolean);
+    const idx = inputs.indexOf(current);
+    const nextIdx = Math.max(0, Math.min(inputs.length-1, idx + (dir||1)));
+    const target = inputs[nextIdx];
+    if(target){
+      target.focus();
+      if(target.select) target.select();
+    }
+  }
+
+  function attachNavHandlers(inp){
+    if(!inp) return;
+    // ONLY override Enter. Let Tab behave natively.
+    inp.addEventListener('keydown', ev=>{
+      if(ev.key === 'Enter'){
+        ev.preventDefault();
+        focusNext(inp, ev.shiftKey ? -1 : 1);
+      }
+    });
+  }
+
+  // ===== UI building & editing =====
   function buildUI(){
     UI.bar.style.display='flex';
     const header = UI.thead, body = UI.tbody;
@@ -658,10 +665,15 @@
     UI.invSel.value = CURRENT;
     if(CURRENT) renderInvoice(CURRENT);
 
+    // Header tab order + Enter behavior
     UI.invSel.tabIndex = 1;
     UI.supplierInp.tabIndex = 2;
     UI.dateInp.tabIndex = 3;
     UI.totalInp.tabIndex = 4;
+    attachNavHandlers(UI.invSel);
+    attachNavHandlers(UI.supplierInp);
+    attachNavHandlers(UI.dateInp);
+    attachNavHandlers(UI.totalInp);
   }
 
   function sortedRowsForCurrent(){
@@ -689,7 +701,12 @@
     UI.stTotal.textContent = '$'+Number(meta.invoice_total||0).toFixed(2);
 
     UI.rows.innerHTML = '';
-    rows.forEach((r, idx)=>{ UI.rows.appendChild(renderRow(r, idx)); });
+    rows.forEach((r, idx)=>{
+      const tr = renderRow(r, idx);
+      tr.dataset.pos = r.position || '';
+      tr.dataset.origin = r.origin || '';
+      UI.rows.appendChild(tr);
+    });
 
     UI.table.style.display='block';
     UI.stats.style.display='grid';
@@ -700,6 +717,20 @@
     UI.totalInp.onchange    = e=> { pushUndo(); updateHdr('invoice_total', e.target.value); recomputeStats(); };
 
     rebuildTabOrder();
+
+    // After a manual "Add Below", focus the POS of that new line
+    if(pendingFocusPos && id === CURRENT){
+      const targetTr = Array.from(UI.rows.querySelectorAll('tr'))
+        .find(tr => tr.dataset.pos === pendingFocusPos && tr.dataset.origin === 'manual_steel');
+      if(targetTr){
+        const posInput = targetTr.querySelector('td:first-child input');
+        if(posInput){
+          posInput.focus();
+          posInput.select && posInput.select();
+        }
+      }
+      pendingFocusPos = null;
+    }
   }
 
   function renderRow(row, idx){
@@ -716,12 +747,7 @@
         pushUndo();
         updateCell(idx, key, inp.value);
       };
-      inp.onkeydown = ev=>{
-        if(ev.key==='Enter' || ev.key==='Tab'){
-          ev.preventDefault();
-          focusNext(inp, ev.shiftKey?-1:1);
-        }
-      };
+      attachNavHandlers(inp);   // only Enter; Tab remains native
       td.appendChild(inp);
       return td;
     }
@@ -755,20 +781,7 @@
     $$('#rows input').forEach(inp=>{ inp.tabIndex = ti++; });
   }
 
-  function focusNext(current, dir){
-    const inputs = [
-      UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp,
-      ...$$('#rows input')
-    ].filter(Boolean);
-    const idx = inputs.indexOf(current);
-    const nextIdx = Math.max(0, Math.min(inputs.length-1, idx + (dir||1)));
-    const target = inputs[nextIdx];
-    if(target){
-      target.focus();
-      if(target.select) target.select();
-    }
-  }
-
+  // Update underlying data + recompute steel/base totals, without rebuilding the whole table
   function updateCell(viewIdx, key, val){
     const rows = sortedRowsForCurrent();
     const target = rows[viewIdx];
@@ -776,8 +789,33 @@
     if(idx>=0){
       ALL[idx][key]=val;
       applySteelAdjustments(CURRENT);
-      renderInvoice(CURRENT);
+      recomputeStats();
+      syncCurrentInvoiceInputs();
     }
+  }
+
+  // Keep existing inputs in sync with the ALL[] model
+  function syncCurrentInvoiceInputs(){
+    const rows = sortedRowsForCurrent();
+    const trs = Array.from(UI.rows.querySelectorAll('tr'));
+    rows.forEach((row,i)=>{
+      const tr = trs[i];
+      if(!tr) return;
+      const inputs = tr.querySelectorAll('input');
+      const vals = [
+        row.position ?? '',
+        row.part_number ?? '',
+        row.quantity ?? '',
+        row.unit ?? '',
+        row.unit_price ?? '',
+        row.line_total ?? '',
+        row.net_weight ?? '',
+        row.country_of_origin ?? ''
+      ];
+      inputs.forEach((inp,j)=>{
+        if(vals[j] !== undefined) inp.value = vals[j];
+      });
+    });
   }
 
   function addBelow(viewIdx){
@@ -801,6 +839,7 @@
     };
     const idx = ALL.indexOf(base);
     ALL.splice(idx+1, 0, insert);
+    pendingFocusPos = insert.position;
     applySteelAdjustments(CURRENT);
     renderInvoice(CURRENT);
   }
@@ -834,7 +873,7 @@
     UI.stDiff.textContent  = '$'+diff.toFixed(2);
   }
 
-  // === Steel adjustment: base line total = original − sum(steel sublines) ===
+  // === Steel adjustment: base line total = original − sum(steel S-lines) ===
   function applySteelAdjustments(invId){
     if(!invId) return;
     const rows = ALL.filter(r=>r.invoice_number===invId);
@@ -867,7 +906,7 @@
     });
   }
 
-  // ======= SUPPLIER MID LOOKUP HELPERS =======
+  // ===== Supplier MID lookup =====
   function stripDiacritics(s){ 
     try { return s.normalize('NFKD').replace(/[\u0300-\u036f]/g,''); } 
     catch(_) { return s; } 
@@ -939,7 +978,7 @@
     return best.score >= thresh ? best.mid : '';
   }
 
-  // ======= TARIFF LOOKUP HELPERS =======
+  // ===== Tariff helpers (use full part, fallback to base) =====
   function extractBasePartNumber(fullPartNum){
     const s = String(fullPartNum || '').trim();
     const head = s.split('.')[0];
@@ -950,25 +989,33 @@
     return fallback || alnum || '';
   }
 
-  function lookupTariffs(basePartNum){
+  function lookupTariffsByPart(partNumber){
     if(!grassDb || !grassDb.length) return [];
-    const part = grassDb.find(row => String(row['PRIMARY PART NUM']) === basePartNum);
-    if(!part) return [];
-    const tariffs = [];
-    
-    // Check TARIFF NUM column first
-    if(part['TARIFF NUM']){
-      const tariffStr = String(part['TARIFF NUM']).replace(/\.0$/, '');
-      tariffs.push(tariffStr);
+    const full = String(partNumber || '').trim();
+    let partRow = null;
+
+    if(full){
+      partRow = grassDb.find(row => String(row['PRIMARY PART NUM'] ?? '').trim() === full);
     }
-    
-    // Then check TARIFF NUM_1 through TARIFF NUM_5
-    for(let i=1; i<=5; i++){
-      const col = `TARIFF NUM_${i}`;
-      if(part[col]){
-        const tariffStr = String(part[col]).replace(/\.0$/, '');
-        tariffs.push(tariffStr);
+    if(!partRow){
+      const base = extractBasePartNumber(full);
+      if(base){
+        partRow = grassDb.find(row => String(row['PRIMARY PART NUM'] ?? '').trim() === base);
       }
+    }
+    if(!partRow) return [];
+
+    const tariffs = [];
+    const addTariff = v => {
+      if(v !== undefined && v !== null && v !== ''){
+        const tariffStr = String(v).replace(/\.0$/, '');
+        if(tariffStr) tariffs.push(tariffStr);
+      }
+    };
+
+    addTariff(partRow['TARIFF NUM']);
+    for(let i=1; i<=5; i++){
+      addTariff(partRow[`TARIFF NUM_${i}`]);
     }
     return tariffs;
   }
@@ -976,7 +1023,7 @@
   function lookupHtsUom(htsCode){
     if(!htsCodesDb || !htsCodesDb.length) return {uom1: '', uom2: ''};
     const hts = htsCodesDb.find(row => String(row['HTS Code']) === String(htsCode));
-    if(!hts) return {uom1: '', uom2: ''};
+    if(!hts) return {uom1: '', uom2: '' };
     return { uom1: hts['UOM1'] || '', uom2: hts['UOM2'] || '' };
   }
 
@@ -996,7 +1043,7 @@
     return '';
   }
 
-  // ======= Descartes export with enhanced functionality =======
+  // ===== Descartes export (full part number in Buyer/Supplier fields) =====
   function exportToDescartes(){
     if(!ALL.length){
       showAlert('No data to export', false);
@@ -1039,16 +1086,15 @@
 
       let buyerPartNum, supplierPartNum;
       if (!isSteelLine && !isAlumLine) {
-        const basePart = extractBasePartNumber(item.part_number);
-        buyerPartNum = basePart;
-        supplierPartNum = basePart;
+        // FULL parsed part number in template
+        buyerPartNum = item.part_number || '';
+        supplierPartNum = item.part_number || '';
       } else {
         const parentPos = String(item.position||'').replace(/[SA]$/,'');
         const parentItem = items.find(it => it.invoice_number===item.invoice_number && it.position === parentPos);
         let tariffForSubline = null;
         if (parentItem) {
-          const parentBase = extractBasePartNumber(parentItem.part_number);
-          const parentTariffs = lookupTariffs(parentBase);
+          const parentTariffs = lookupTariffsByPart(parentItem.part_number);
           tariffForSubline = parentTariffs.find(t => !String(t).startsWith('98') && !String(t).startsWith('99')) || null;
         }
         const subNum = tariffForSubline
@@ -1150,15 +1196,12 @@
         '5 Value': ''
       };
 
-      // Special handling for steel/aluminum sublines
       if (isSteelLine || isAlumLine) {
         row['NetWeight'] = roundWeight(item.quantity);
       }
 
-      // Tariff lookups for non-steel/aluminum lines
       if (!isSteelLine && !isAlumLine) {
-        const basePartNum = extractBasePartNumber(item.part_number);
-        const tariffs = lookupTariffs(basePartNum);
+        const tariffs = lookupTariffsByPart(item.part_number);
         const tariffFields = ['TariffNumber', 'SecondaryTariffNumber', 'ThirdTariffNumber', '4TariffNumber', '5TariffNumber'];
 
         tariffs.forEach((tariff, idx) => {
@@ -1193,7 +1236,6 @@
         });
       }
 
-      // Override tariffs for steel lines
       if (isSteelLine) {
         row['TariffNumber'] = '99030133';
         row['SecondaryTariffNumber'] = '99038191';
@@ -1201,7 +1243,6 @@
         row['Secondaryunitofmeasure1'] = 'KG';
       }
 
-      // Override tariffs for aluminum lines
       if (isAlumLine) {
         row['TariffNumber'] = '99030133';
         row['SecondaryTariffNumber'] = '99038508';
