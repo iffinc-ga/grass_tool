@@ -1182,7 +1182,7 @@
         'InvoiceDate': item.invoice_date || '',
         'InvoiceTotal': item.invoice_total || '',
         'SupplierMID': lookupSupplierMIDFromText(supplierForInvoice),
-        'SupplierName': supplierForInvoice,
+        'SupplierName': '',   // leave blank by request
         'BuyerPartNumber': buyerPartNum,
         'SupplierPartNumber': supplierPartNum,
         'Quantity': item.quantity || '',
@@ -1271,77 +1271,76 @@
       return row;
     }
 
-  function fillTariffsForBaseRow(row, partNumber, netWeightStr){
-    const tariffs = lookupTariffsByPart(partNumber);
-    const tariffFields = ['TariffNumber', 'SecondaryTariffNumber', 'ThirdTariffNumber', '4TariffNumber', '5TariffNumber'];
-    const netRounded = roundWeight(netWeightStr);
+    function fillTariffsForBaseRow(row, partNumber, netWeightStr){
+      const tariffs = lookupTariffsByPart(partNumber);
+      const tariffFields = ['TariffNumber', 'SecondaryTariffNumber', 'ThirdTariffNumber', '4TariffNumber', '5TariffNumber'];
+      const netRounded = roundWeight(netWeightStr);
+      const partUpper = String(partNumber).toUpperCase();
 
-    // First, apply the default behavior: fill tariff numbers + UOMs based on NetWeight
-    tariffs.forEach((tariff, idx) => {
-      if(idx < tariffFields.length){
-        row[tariffFields[idx]] = tariff;
-        const startsWithExempt = String(tariff).startsWith('98') || String(tariff).startsWith('99');
-        if(!startsWithExempt){
-          const uomInfo = lookupHtsUom(tariff);
-          if(idx === 0){
-            row['Quantity1'] = netRounded;
-            row['UnitOfMeasure1'] = uomInfo.uom1;
-            if(uomInfo.uom2){
-              row['Quantity2'] = netRounded;
-              row['UnitOfMeasure2'] = uomInfo.uom2;
-            }
-          } else if(idx === 1){
-            row['Secondary Quantity1'] = netRounded;
-            row['Secondaryunitofmeasure1'] = uomInfo.uom1;
-            if(uomInfo.uom2){
-              row['secondaryquantity2'] = netRounded;
-              row['secondaryunitofmeasure2'] = uomInfo.uom2;
-            }
-          } else if(idx === 2){
-            row['ThirdTariffQuantity1'] = netRounded;
-            row['ThirdTariffUnitofMeasure1'] = uomInfo.uom1;
-            if(uomInfo.uom2){
-              row['ThirdTariffQuantity2'] = netRounded;
-              row['ThirdTariffUnitofMeasure2'] = uomInfo.uom2;
-            }
-          } else if(idx === 3){
-            row['4TariffQuantity1'] = netRounded;
-            row['4TariffUnitofMeasure1'] = uomInfo.uom1;
-            if(uomInfo.uom2){
-              row['4TariffQuantity2'] = netRounded;
-              row['4TariffUnitofMeasure2'] = uomInfo.uom2;
-            }
-          } else if(idx === 4){
-            row['5TariffQuantity1'] = netRounded;
-            row['5TariffUnitofMeasure1'] = uomInfo.uom1;
-            if(uomInfo.uom2){
-              row['5TariffQuantity2'] = netRounded;
-              row['5TariffUnitofMeasure2'] = uomInfo.uom2;
+      // Default behavior: fill tariff fields and weight-based quantities
+      tariffs.forEach((tariff, idx) => {
+        if(idx < tariffFields.length){
+          row[tariffFields[idx]] = tariff;
+          const startsWithExempt = String(tariff).startsWith('98') || String(tariff).startsWith('99');
+          if(!startsWithExempt){
+            const uomInfo = lookupHtsUom(tariff);
+            if(idx === 0){
+              row['Quantity1'] = netRounded;
+              row['UnitOfMeasure1'] = uomInfo.uom1;
+              if(uomInfo.uom2){
+                row['Quantity2'] = netRounded;
+                row['UnitOfMeasure2'] = uomInfo.uom2;
+              }
+            } else if(idx === 1){
+              row['Secondary Quantity1'] = netRounded;
+              row['Secondaryunitofmeasure1'] = uomInfo.uom1;
+              if(uomInfo.uom2){
+                row['secondaryquantity2'] = netRounded;
+                row['secondaryunitofmeasure2'] = uomInfo.uom2;
+              }
+            } else if(idx === 2){
+              row['ThirdTariffQuantity1'] = netRounded;
+              row['ThirdTariffUnitofMeasure1'] = uomInfo.uom1;
+              if(uomInfo.uom2){
+                row['ThirdTariffQuantity2'] = netRounded;
+                row['ThirdTariffUnitofMeasure2'] = uomInfo.uom2;
+              }
+            } else if(idx === 3){
+              row['4TariffQuantity1'] = netRounded;
+              row['4TariffUnitofMeasure1'] = uomInfo.uom1;
+              if(uomInfo.uom2){
+                row['4TariffQuantity2'] = netRounded;
+                row['4TariffUnitofMeasure2'] = uomInfo.uom2;
+              }
+            } else if(idx === 4){
+              row['5TariffQuantity1'] = netRounded;
+              row['5TariffUnitofMeasure1'] = uomInfo.uom1;
+              if(uomInfo.uom2){
+                row['5TariffQuantity2'] = netRounded;
+                row['5TariffUnitofMeasure2'] = uomInfo.uom2;
+              }
             }
           }
         }
-      }
-    });
+      });
 
-    // Special handling for STEEL EXCL parts with third tariff:
-    // Always put NetWeight into ThirdTariffQuantity1 when a 3rd tariff exists in the DB.
-    const partUpper = String(partNumber).toUpperCase();
-    if(partUpper.startsWith('STEEL EXCL') && tariffs.length > 2 && tariffs[2]){
-      row['ThirdTariffQuantity1'] = netRounded;
-    }
-
-    // Special handling for ALL STEEL parts:
-    //  - Keep automatic UOM behavior
-    //  - Secondary Quantity1 already uses NetWeight from the logic above
-    //  - If a 3rd tariff exists in the DB, also put NetWeight into ThirdTariffQuantity1
-    //  - Only the *primary* TariffNumber column should be blank for ALL STEEL
-    if(partUpper.startsWith('ALL STEEL')){
-      if(tariffs.length > 2 && tariffs[2]){
+      // STEEL EXCL base parts with a 3rd tariff: ensure ThirdTariffQuantity1 uses NetWeight
+      if(partUpper.startsWith('STEEL EXCL') && tariffs.length > 2 && tariffs[2]){
         row['ThirdTariffQuantity1'] = netRounded;
       }
-      row['TariffNumber'] = '';
+
+      // ALL STEEL base parts:
+      // - keep UOM behavior
+      // - if 3rd tariff exists, ThirdTariffQuantity1 = NetWeight
+      // - ONLY TariffNumber is forced blank
+      if(partUpper.startsWith('ALL STEEL')){
+        if(tariffs.length > 2 && tariffs[2]){
+          row['ThirdTariffQuantity1'] = netRounded;
+        }
+        // blank only the primary tariff column
+        row['TariffNumber'] = '';
+      }
     }
-  }
 
     function buildSteelOrAlumRow(item, type){
       const isSteel = (type === 'Steel');
@@ -1356,6 +1355,7 @@
         const parentTariffs = lookupTariffsByPart(parentItem.part_number);
         tariffForSubline = parentTariffs.find(t => !String(t).startsWith('98') && !String(t).startsWith('99')) || null;
       }
+
       const subNum = tariffForSubline
         ? getSteelAlumPartNumber(tariffForSubline, isSteel ? 'Steel' : 'Aluminum')
         : (isSteel ? 'STEEL GENERIC' : 'ALUM GENERIC');
@@ -1365,6 +1365,7 @@
       const row = buildBaseRowSkeleton(item, buyerPartNum, supplierPartNum, item.line_total);
 
       const qtyRounded = roundWeight(item.quantity);
+
       if(isSteel){
         row['TariffNumber'] = '99030133';
         row['SecondaryTariffNumber'] = '99038191';
@@ -1375,6 +1376,19 @@
       row['Secondary Quantity1'] = qtyRounded;
       row['Secondaryunitofmeasure1'] = 'KG';
       row['NetWeight'] = qtyRounded;
+
+      // Special handling for STEEL EXCL steel lines:
+      // Look up subNum in DB; if it has a 3rd tariff, put it into ThirdTariffNumber
+      // and the steel quantity into ThirdTariffQuantity1
+      const partUpper = String(subNum).toUpperCase();
+      if (partUpper.startsWith('STEEL EXCL')) {
+        const tariffs = lookupTariffsByPart(subNum);
+        if (tariffs.length > 2 && tariffs[2]) {
+          row['ThirdTariffNumber'] = tariffs[2];
+          row['ThirdTariffQuantity1'] = qtyRounded;
+        }
+      }
+
       return row;
     }
 
