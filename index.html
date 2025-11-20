@@ -65,7 +65,7 @@
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Grass Invoice PDF Parser (Steel-only + Undo)</h1>
+      <h1>Grass Invoice PDF Parser</h1>
       <p>Only steel sublines are kept. Base line total = original invoice total − sum of steel sublines.</p>
     </div>
 
@@ -1325,13 +1325,32 @@
       // Special handling for STEEL EXCL parts with third tariff
       const partUpper = String(partNumber).toUpperCase();
       if(partUpper.startsWith('STEEL EXCL') && tariffs.length > 2 && tariffs[2]){
+        // Ensure ThirdTariffQuantity1 is populated with net weight
         row['ThirdTariffQuantity1'] = netRounded;
       }
 
-      // Special handling for ALL STEEL parts
+      // Special handling for ALL STEEL parts - clear all tariff numbers and UOMs but keep quantities
       if(partUpper.startsWith('ALL STEEL')){
         row['TariffNumber'] = '';
+        row['UnitOfMeasure1'] = '';
+        row['UnitOfMeasure2'] = '';
+        row['UnitOfMeasure3'] = '';
+        row['SecondaryTariffNumber'] = '';
         row['Secondaryunitofmeasure1'] = '';
+        row['secondaryunitofmeasure2'] = '';
+        row['secondaryunitofmeasure3'] = '';
+        row['ThirdTariffNumber'] = '';
+        row['ThirdTariffUnitofMeasure1'] = '';
+        row['ThirdTariffUnitofMeasure2'] = '';
+        row['ThirdTariffUnitofMeasure3'] = '';
+        row['4TariffNumber'] = '';
+        row['4TariffUnitofMeasure1'] = '';
+        row['4TariffUnitofMeasure2'] = '';
+        row['4TariffUnitofMeasure3'] = '';
+        row['5TariffNumber'] = '';
+        row['5TariffUnitofMeasure1'] = '';
+        row['5TariffUnitofMeasure2'] = '';
+        row['5TariffUnitofMeasure3'] = '';
       }
     }
 
