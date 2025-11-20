@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Grass Invoice PDF Parser — Steel-only + Undo + HTS</title>
+  <title>Grass Invoice PDF Parser — Steel-only + Undo</title>
   <!-- Libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
@@ -65,8 +65,8 @@
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Grass Invoice PDF Parser (Steel-only + Undo + HTS)</h1>
-      <p>Steel sublines + Descartes export with HTS mapped from updated_grass_db.xlsx.</p>
+      <h1>Grass Invoice PDF Parser (Steel-only + Undo)</h1>
+      <p>Only steel sublines are kept. Base line total = original invoice total − sum of steel sublines.</p>
     </div>
 
     <!-- DB banner -->
@@ -149,21 +149,12 @@
   };
 
   let ALL = [], ORDER = [], CURRENT = '', filename = '';
-  let grassDb = [];          // raw DB rows
-  let grassDbIndex = null;   // normalized part -> row
-  let grassDbNormRows = [];  // [{norm, row}]
-  let grassDbCols = {
-    partKey: null,
-    tariffKey: null,
-    descKey: null,
-    uomKey: null,
-    supplierMidKey: null,
-    thirdTariffKey: null
-  };
-
+  let grassDb = [], htsCodesDb = [], steelAlumDb = [];
+  let supplierMidDb = [], supplierMidIndex = [];
   let undoStack = [];
+  let pendingFocusPos = null;
 
-  // ======= DB loader for updated_grass_db.xlsx =======
+  // ===== DB loader =====
   const GITHUB_CONFIG = {
     owner: 'iffinc-ga',
     repo:  'all_in_one_manki',
@@ -201,21 +192,35 @@
   }
 
   async function hydrateDbFromWorkbook(workbook){
-    const sheetName =
+    const grassSheetName =
       workbook.SheetNames.find(n => n.toLowerCase().includes('grass')) ||
       workbook.SheetNames[0];
-    grassDb = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {defval:''});
-    buildGrassDbIndex();
+    grassDb = XLSX.utils.sheet_to_json(workbook.Sheets[grassSheetName], {defval:''});
+    console.log(`[DB] Loaded ${grassSheetName}: ${grassDb.length} rows`);
+
+    if(workbook.SheetNames.includes('hts_codes_with_uom')){
+      htsCodesDb = XLSX.utils.sheet_to_json(workbook.Sheets['hts_codes_with_uom']);
+      console.log(`[DB] Loaded hts_codes_with_uom: ${htsCodesDb.length} rows`);
+    }
+
+    if(workbook.SheetNames.includes('Sheet1')){
+      steelAlumDb = XLSX.utils.sheet_to_json(workbook.Sheets['Sheet1']);
+      console.log(`[DB] Loaded Sheet1: ${steelAlumDb.length} rows`);
+    }
+
+    if(workbook.SheetNames.includes('MID')){
+      supplierMidDb = XLSX.utils.sheet_to_json(workbook.Sheets['MID'], {defval:''});
+      buildSupplierMidIndex();
+      console.log(`[DB] Loaded MID: ${supplierMidDb.length} rows`);
+    }
   }
 
   function enterOfflineMode(reason){
     grassDb = grassDb || [];
-    grassDbIndex = null;
-    grassDbNormRows = [];
-    grassDbCols = {
-      partKey:null, tariffKey:null, descKey:null,
-      uomKey:null, supplierMidKey:null, thirdTariffKey:null
-    };
+    htsCodesDb = htsCodesDb || [];
+    steelAlumDb = steelAlumDb || [];
+    supplierMidDb = supplierMidDb || [];
+    supplierMidIndex = supplierMidIndex || [];
     setDbBanner('offline','DB: offline', reason || 'Proceeding without DB enrichment.');
   }
 
@@ -250,78 +255,7 @@
   offlineDbBtn?.addEventListener('click', ()=> enterOfflineMode('Offline mode selected by user.'));
   window.addEventListener('DOMContentLoaded', ()=>{ loadDatabaseFromGitHub().catch(()=>{}); });
 
-  // ======= DB index & lookup helpers =======
-  function normalizePart(s){
-    if(!s) return '';
-    return String(s)
-      .replace(/^Steel\s*-\s*/i,'')   // strip Steel - prefix for matching
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g,'');
-  }
-
-  function buildGrassDbIndex(){
-    grassDbIndex = {};
-    grassDbNormRows = [];
-    grassDbCols = {
-      partKey:null, tariffKey:null, descKey:null,
-      uomKey:null, supplierMidKey:null, thirdTariffKey:null
-    };
-
-    if(!grassDb || !grassDb.length) return;
-    const sample = grassDb[0];
-    const keys = Object.keys(sample);
-
-    function findKey(regexes){
-      return keys.find(k => regexes.some(r => r.test(k))) || null;
-    }
-
-    grassDbCols.partKey        = findKey([/part/i, /article/i, /item/i]);
-    grassDbCols.tariffKey      = findKey([/hts/i, /tariff$/i, /^tariff\s*$/i, /tariff_?1/i]);
-    grassDbCols.descKey        = findKey([/desc/i]);
-    grassDbCols.uomKey         = findKey([/uom/i, /unit/i]);
-    grassDbCols.supplierMidKey = findKey([/mid/i]);
-    // try to detect a "third tariff" column for the Steel Excl behavior
-    grassDbCols.thirdTariffKey = findKey([
-      /third.*tariff/i,
-      /tariff.*3/i,
-      /3.*tariff/i,
-      /hts.*3/i,
-      /tariff_?3/i
-    ]);
-
-    grassDb.forEach(row=>{
-      const rawPart = grassDbCols.partKey ? row[grassDbCols.partKey] : '';
-      const norm    = normalizePart(rawPart);
-      if(!norm) return;
-      grassDbIndex[norm] = row;
-      grassDbNormRows.push({ norm, row });
-    });
-  }
-
-  function getDbInfoForPart(partStr){
-    if(!grassDbIndex || !grassDbNormRows.length) return null;
-    const norm = normalizePart(partStr);
-    if(!norm) return null;
-
-    // exact first
-    if(grassDbIndex[norm]) return grassDbIndex[norm];
-
-    // fallback: longest partial match
-    let best = null;
-    let bestLen = 0;
-    grassDbNormRows.forEach(({norm:dbNorm,row})=>{
-      if(!dbNorm) return;
-      if(norm.includes(dbNorm) || dbNorm.includes(norm)){
-        if(dbNorm.length > bestLen){
-          bestLen = dbNorm.length;
-          best = row;
-        }
-      }
-    });
-    return best;
-  }
-
-  // ======= Utility helpers =======
+  // ===== Utility helpers =====
   function showAlert(msg, ok=true){
     UI.alert.className = 'alert ' + (ok?'ok':'err');
     UI.alert.textContent = msg;
@@ -351,7 +285,6 @@
   };
   const sumLines = list => list.reduce((a,r)=> a + (parseNum(r.line_total)||0), 0);
 
-  // Undo stack
   function pushUndo(){
     undoStack.push(JSON.parse(JSON.stringify(ALL)));
     if(undoStack.length > 50) undoStack.shift();
@@ -373,7 +306,7 @@
     buildUI();
   }
 
-  // ======= File handling =======
+  // ===== File handling =====
   UI.drop.addEventListener('click', ()=> UI.file.click());
   UI.file.addEventListener('change', e=>{
     const f=e.target.files?.[0];
@@ -383,7 +316,9 @@
     e.preventDefault();
     UI.drop.style.background='#f1f5ff';
   });
-  UI.drop.addEventListener('dragleave', ()=> UI.drop.style.background='');
+  UI.drop.addEventListener('dragleave', ()=>{
+    UI.drop.style.background='';
+  });
   UI.drop.addEventListener('drop', e=>{
     e.preventDefault();
     UI.drop.style.background='';
@@ -401,7 +336,7 @@
     filename = file.name.replace(/\.pdf$/i,'');
     UI.upload.style.display='none';
     UI.loading.style.display='block';
-    undoStack = [];  // reset undo history
+    undoStack = [];
 
     try{
       const buf = new Uint8Array(await file.arrayBuffer());
@@ -443,7 +378,7 @@
     }
   }
 
-  // ======= Core Grass parsing (same as previous working version) =======
+  // ===== Core Grass parsing (unchanged logic) =====
   function parseGrass(text){
     ALL.length = 0;
     ORDER.length = 0;
@@ -504,7 +439,8 @@
     const steelInfo = items.map(()=>({ steelKG:NaN, steelVal:NaN }));
     const usedBlockIdx = new Set();
 
-    const blockRegex = /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)\s*Net\s*weight\s*in\s*kg\s*in\s*other\s*:\s*([\d.,]+)\s*Steel\s*value\s*:\s*([\d.,]+)\s*Other\s*value\s*:\s*([\d.,]+)/gi;
+    const blockRegex =
+      /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)\s*Net\s*weight\s*in\s*kg\s*in\s*other\s*:\s*([\d.,]+)\s*Steel\s*value\s*:\s*([\d.,]+)\s*Other\s*value\s*:\s*([\d.,]+)/gi;
     let mb;
     while((mb = blockRegex.exec(big)) !== null){
       const blockIdx = mb.index;
@@ -529,11 +465,10 @@
         const valDiff = Math.abs(baseVal - blockVal);
         const netRel = netDiff / Math.max(Math.abs(baseNet), Math.abs(blockNet), 1);
         const valRel = valDiff / Math.max(Math.abs(baseVal), Math.abs(blockVal), 1);
-
         if(netRel > 0.01 || valRel > 0.01) return;
 
         const dist = Math.abs(blockIdx - it.idx);
-        const score = netRel + valRel + dist / 1000000;
+        const score = netRel + valRel + dist / 1_000_000;
         if(score < bestScore){
           bestScore = score;
           bestIdx = i;
@@ -663,7 +598,32 @@
     });
   }
 
-  // ======= UI building & editing =======
+  // ===== Keyboard navigation =====
+  function focusNext(current, dir){
+    const inputs = [
+      UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp,
+      ...$$('#rows input')
+    ].filter(Boolean);
+    const idx = inputs.indexOf(current);
+    const nextIdx = Math.max(0, Math.min(inputs.length-1, idx + (dir||1)));
+    const target = inputs[nextIdx];
+    if(target){
+      target.focus();
+      if(target.select) target.select();
+    }
+  }
+
+  function attachNavHandlers(inp){
+    if(!inp) return;
+    inp.addEventListener('keydown', ev=>{
+      if(ev.key === 'Enter'){
+        ev.preventDefault();
+        focusNext(inp, ev.shiftKey ? -1 : 1);
+      }
+    });
+  }
+
+  // ===== UI building & editing =====
   function buildUI(){
     UI.bar.style.display='flex';
     const header = UI.thead, body = UI.tbody;
@@ -708,6 +668,10 @@
     UI.supplierInp.tabIndex = 2;
     UI.dateInp.tabIndex = 3;
     UI.totalInp.tabIndex = 4;
+    attachNavHandlers(UI.invSel);
+    attachNavHandlers(UI.supplierInp);
+    attachNavHandlers(UI.dateInp);
+    attachNavHandlers(UI.totalInp);
   }
 
   function sortedRowsForCurrent(){
@@ -735,7 +699,12 @@
     UI.stTotal.textContent = '$'+Number(meta.invoice_total||0).toFixed(2);
 
     UI.rows.innerHTML = '';
-    rows.forEach((r, idx)=>{ UI.rows.appendChild(renderRow(r, idx)); });
+    rows.forEach((r, idx)=>{
+      const tr = renderRow(r, idx);
+      tr.dataset.pos = r.position || '';
+      tr.dataset.origin = r.origin || '';
+      UI.rows.appendChild(tr);
+    });
 
     UI.table.style.display='block';
     UI.stats.style.display='grid';
@@ -746,6 +715,19 @@
     UI.totalInp.onchange    = e=> { pushUndo(); updateHdr('invoice_total', e.target.value); recomputeStats(); };
 
     rebuildTabOrder();
+
+    if(pendingFocusPos && id === CURRENT){
+      const targetTr = Array.from(UI.rows.querySelectorAll('tr'))
+        .find(tr => tr.dataset.pos === pendingFocusPos && tr.dataset.origin === 'manual_steel');
+      if(targetTr){
+        const posInput = targetTr.querySelector('td:first-child input');
+        if(posInput){
+          posInput.focus();
+          posInput.select && posInput.select();
+        }
+      }
+      pendingFocusPos = null;
+    }
   }
 
   function renderRow(row, idx){
@@ -762,12 +744,7 @@
         pushUndo();
         updateCell(idx, key, inp.value);
       };
-      inp.onkeydown = ev=>{
-        if(ev.key==='Enter' || ev.key==='Tab'){
-          ev.preventDefault();
-          focusNext(inp, ev.shiftKey?-1:1);
-        }
-      };
+      attachNavHandlers(inp);
       td.appendChild(inp);
       return td;
     }
@@ -801,20 +778,6 @@
     $$('#rows input').forEach(inp=>{ inp.tabIndex = ti++; });
   }
 
-  function focusNext(current, dir){
-    const inputs = [
-      UI.invSel, UI.supplierInp, UI.dateInp, UI.totalInp,
-      ...$$('#rows input')
-    ].filter(Boolean);
-    const idx = inputs.indexOf(current);
-    const nextIdx = Math.max(0, Math.min(inputs.length-1, idx + (dir||1)));
-    const target = inputs[nextIdx];
-    if(target){
-      target.focus();
-      if(target.select) target.select();
-    }
-  }
-
   function updateCell(viewIdx, key, val){
     const rows = sortedRowsForCurrent();
     const target = rows[viewIdx];
@@ -822,8 +785,32 @@
     if(idx>=0){
       ALL[idx][key]=val;
       applySteelAdjustments(CURRENT);
-      renderInvoice(CURRENT);
+      recomputeStats();
+      syncCurrentInvoiceInputs();
     }
+  }
+
+  function syncCurrentInvoiceInputs(){
+    const rows = sortedRowsForCurrent();
+    const trs = Array.from(UI.rows.querySelectorAll('tr'));
+    rows.forEach((row,i)=>{
+      const tr = trs[i];
+      if(!tr) return;
+      const inputs = tr.querySelectorAll('input');
+      const vals = [
+        row.position ?? '',
+        row.part_number ?? '',
+        row.quantity ?? '',
+        row.unit ?? '',
+        row.unit_price ?? '',
+        row.line_total ?? '',
+        row.net_weight ?? '',
+        row.country_of_origin ?? ''
+      ];
+      inputs.forEach((inp,j)=>{
+        if(vals[j] !== undefined) inp.value = vals[j];
+      });
+    });
   }
 
   function addBelow(viewIdx){
@@ -847,6 +834,7 @@
     };
     const idx = ALL.indexOf(base);
     ALL.splice(idx+1, 0, insert);
+    pendingFocusPos = insert.position;
     applySteelAdjustments(CURRENT);
     renderInvoice(CURRENT);
   }
@@ -912,7 +900,204 @@
     });
   }
 
-  // ======= Descartes export with HTS + special Steel Excl / ALL STEEL behavior =======
+  // ===== Supplier MID lookup =====
+  function stripDiacritics(s){ 
+    try { return s.normalize('NFKD').replace(/[\u0300-\u036f]/g,''); } 
+    catch(_) { return s; } 
+  }
+
+  function normalizeSupplierName(s){
+    return stripDiacritics(String(s||''))
+      .toLowerCase()
+      .replace(/&/g,' and ')
+      .replace(/\b(gmbh|co\.?|kg|llc|inc\.?|ltd\.?|company|coatings|industrie|lackfabrik|the|and|of|factory|fabrik|sa|ag|gebr|geb\.)\b/gi,'')
+      .replace(/[^a-z0-9]+/g,'')
+      .trim();
+  }
+
+  function onlyConsonants(s){ return String(s||'').replace(/[aeiou]/gi,''); }
+
+  function diceCoefficient(a,b){
+    if(!a || !b) return 0;
+    if(a === b) return 1;
+    const grams = t => { const r=[]; for(let i=0;i<t.length-1;i++) r.push(t.slice(i,i+2)); return r; };
+    const A=grams(a), B=grams(b);
+    if(!A.length || !B.length) return 0;
+    const map={}; let hit=0;
+    A.forEach(g=>map[g]=(map[g]||0)+1);
+    B.forEach(g=>{ if(map[g]){ hit++; map[g]--; }});
+    return (2*hit)/(A.length+B.length);
+  }
+
+  function buildSupplierMidIndex(){
+    supplierMidIndex = [];
+    if(!Array.isArray(supplierMidDb)) return;
+    supplierMidDb.forEach(row=>{
+      const rawName = String(row['MANUFACTURERNAME'] ?? '').trim();
+      const rawMid  = String(row['MANUFACTURERID'] ?? '').trim();
+      if(!rawName || !rawMid) return;
+      const norm = normalizeSupplierName(rawName);
+      supplierMidIndex.push({ raw: rawName, norm, cons: onlyConsonants(norm), mid: rawMid });
+    });
+  }
+
+  function scoreSupplierCandidate(qNorm, qRaw, rec){
+    const exact = qNorm === rec.norm ? 1 : 0;
+    const starts = rec.norm.startsWith(qNorm) ? 0.95 : 0;
+    const contains = rec.norm.includes(qNorm) || qNorm.includes(rec.norm) ? 0.85 : 0;
+    const dice = diceCoefficient(qNorm, rec.norm);
+    const qCons = onlyConsonants(qNorm);
+    const consDice = diceCoefficient(qCons, rec.cons);
+    let shortBoost = 0;
+    if(qNorm.length >= 3 && qNorm.length <= 6){
+      if(rec.norm.includes(qNorm)) shortBoost = 0.25;
+      else if(rec.cons.includes(qCons)) shortBoost = 0.18;
+    }
+    const rawContains = stripDiacritics(rec.raw).toLowerCase().includes(stripDiacritics(qRaw).toLowerCase()) ? 0.2 : 0;
+    return Math.max(exact, starts, contains, dice, consDice) + shortBoost + rawContains;
+  }
+
+  function lookupSupplierMIDFromText(userSupplierText){
+    if(!userSupplierText) return '';
+    if(!supplierMidIndex.length) return '';
+    const qRaw  = String(userSupplierText||'').trim();
+    const qNorm = normalizeSupplierName(qRaw);
+    if(!qNorm) return '';
+    let best = { score: 0, mid: '' };
+    for(const rec of supplierMidIndex){
+      const s = scoreSupplierCandidate(qNorm, qRaw, rec);
+      if(s > best.score) best = { score: s, mid: rec.mid };
+    }
+    const thresh = (qNorm.length <= 6) ? 0.38 : 0.45;
+    return best.score >= thresh ? best.mid : '';
+  }
+
+  // ===== Tariff helpers (full-part + ALL STEEL logic) =====
+  function extractBasePartNumber(fullPartNum){
+    const s = String(fullPartNum || '').trim();
+    const head = s.split('.')[0];
+    const alnum = (head.match(/[A-Za-z0-9]+/)||[''])[0];
+    if (alnum.length >= 5) return alnum.slice(0,5);
+    if (alnum.length === 4) return alnum;
+    const fallback = (s.match(/[A-Za-z0-9]{4,5}/)||[''])[0];
+    return fallback || alnum || '';
+  }
+
+  function findPartRow(partNumber){
+    if(!grassDb || !grassDb.length) return null;
+    const full = String(partNumber || '').trim();
+    if(!full) return null;
+    let row = grassDb.find(r => String(r['PRIMARY PART NUM'] ?? '').trim() === full);
+    if(row) return row;
+    const base = extractBasePartNumber(full);
+    if(base){
+      row = grassDb.find(r => String(r['PRIMARY PART NUM'] ?? '').trim() === base);
+      if(row) return row;
+    }
+    return null;
+  }
+
+  // Normalize numeric tariff values like 8.302423e+09 or 8302423065.0 -> "8302423065"
+  function normalizeTariffValue(v){
+    if(v === null || v === undefined || v === '') return '';
+    const n = Number(v);
+    if(!isNaN(n)){
+      if(Number.isInteger(n)) return String(n);
+      const rn = Math.round(n);
+      if(Math.abs(rn - n) < 1e-6) return String(rn);
+      return String(rn);
+    }
+    let s = String(v).trim();
+    if(!s) return '';
+    if(/e\+/i.test(s)){
+      const f = Number(s);
+      if(!isNaN(f)) return String(Math.round(f));
+    }
+    s = s.replace(/\.0$/,'');
+    return s;
+  }
+
+  function gatherTariffsFromRow(row){
+    const fields = ['TARIFF NUM','TARIFF NUM_1','TARIFF NUM_2','TARIFF NUM_3','TARIFF NUM_4'];
+    const out = [];
+    fields.forEach(f=>{
+      const raw = row[f];
+      if(raw === undefined || raw === null || raw === '') return;
+      const norm = normalizeTariffValue(raw);
+      if(norm) out.push(norm);
+    });
+    return out;
+  }
+
+  // "Main trade tariff" = first tariff that doesn't start with 98/99, else first available
+  function getMainTariffByPart(partNumber){
+    const row = findPartRow(partNumber);
+    if(!row) return '';
+    const tariffs = gatherTariffsFromRow(row);
+    if(!tariffs.length) return '';
+    const non99 = tariffs.find(t => !/^99/.test(t) && !/^98/.test(t));
+    return non99 || tariffs[0];
+  }
+
+  // For a trade tariff (e.g., 8302423065), choose the correct ALL STEEL part
+  function getAllSteelPartForTariff(mainTariff){
+    if(!grassDb || !grassDb.length) return 'ALL STEEL GENERIC';
+    const normTariff = normalizeTariffValue(mainTariff);
+    if(!normTariff) return 'ALL STEEL GENERIC';
+
+    const allSteelRows = grassDb.filter(row => {
+      const p = String(row['PRIMARY PART NUM'] ?? '').toUpperCase();
+      return p.startsWith('ALL STEEL');
+    });
+    if(!allSteelRows.length) return 'ALL STEEL GENERIC';
+
+    let match = allSteelRows.find(row => {
+      const tariffs = gatherTariffsFromRow(row);
+      return tariffs.includes(normTariff);
+    });
+
+    if(match){
+      return String(match['PRIMARY PART NUM'] || 'ALL STEEL GENERIC');
+    }
+
+    const generic = allSteelRows.find(row =>
+      String(row['PRIMARY PART NUM'] ?? '').toUpperCase().includes('ALL STEEL GENERIC')
+    );
+    if(generic) return String(generic['PRIMARY PART NUM']);
+    return String(allSteelRows[0]['PRIMARY PART NUM'] || 'ALL STEEL GENERIC');
+  }
+
+  function lookupTariffsByPart(partNumber){
+    const partRow = findPartRow(partNumber);
+    if(!partRow) return [];
+    return gatherTariffsFromRow(partRow);
+  }
+
+  function lookupHtsUom(htsCode){
+    if(!htsCodesDb || !htsCodesDb.length) return {uom1: '', uom2: ''};
+    const hts = htsCodesDb.find(row => String(row['HTS Code']) === String(htsCode));
+    if(!hts) return {uom1: '', uom2: '' };
+    return { uom1: hts['UOM1'] || '', uom2: hts['UOM2'] || '' };
+  }
+
+  function getSteelAlumPartNumber(tariff, type){
+    if(!steelAlumDb || !steelAlumDb.length) return type === 'Steel' ? 'STEEL GENERIC' : 'ALUM GENERIC';
+    const norm = normalizeTariffValue(tariff);
+    const mapping = steelAlumDb.find(row => normalizeTariffValue(row['Tariff']) === norm);
+    if(mapping) return type === 'Steel' ? mapping['Steel'] : mapping['Aluminum'];
+    return type === 'Steel' ? 'STEEL GENERIC' : 'ALUM GENERIC';
+  }
+
+  function computeExportUnitPrice(item){
+    const q = parseNum(item.quantity);
+    const t = parseNum(item.line_total);
+    if (isFinite(q) && q > 0 && isFinite(t)) {
+      return (t / q).toFixed(6);
+    }
+    return '';
+  }
+
+  // ===== Descartes export with 100% steel handling =====
   function exportToDescartes(){
     if(!ALL.length){
       showAlert('No data to export', false);
@@ -948,61 +1133,63 @@
       if(!currentUiSupplierByInvoice[inv]) currentUiSupplierByInvoice[inv] = rec.supplier || '';
     });
 
+    // Group by invoice + base position (numeric part)
+    const groups = {};
+    const orderedEntries = []; // preserve order
+
+    items.forEach(it=>{
+      const pos = String(it.position||'');
+      const m = pos.match(/^(\d+)([A-Z]?)$/);
+      if(!m){
+        orderedEntries.push({type:'single', item:it});
+        return;
+      }
+      const baseNum = m[1];
+      const suffix = (m[2]||'').toUpperCase();
+      const key = `${it.invoice_number}|${baseNum}`;
+      let g = groups[key];
+      if(!g){
+        g = groups[key] = {
+          type:'group',
+          invoice: it.invoice_number,
+          baseNum,
+          base:null,
+          steels:[],
+          alums:[],
+          others:[]
+        };
+        orderedEntries.push(g);
+      }
+      if(!suffix){
+        g.base = it;
+      }else if(suffix === 'S'){
+        g.steels.push(it);
+      }else if(suffix === 'A'){
+        g.alums.push(it);
+      }else{
+        g.others.push(it);
+      }
+    });
+
     const exportRows = [];
-    items.forEach(item => {
+
+    function buildBaseRowSkeleton(item, buyerPartNum, supplierPartNum, itemTotalOverride){
       const supplierForInvoice = (currentUiSupplierByInvoice[item.invoice_number] || item.supplier || '');
-      const buyerPartNum = item.part_number || '';
-      const supplierPartNum = item.part_number || '';
-
-      const isSteelExcl = /^STEEL\s+EXCL/i.test(item.part_number || '');
-      const isAllSteel  = /^ALL\s+STEEL/i.test(item.part_number || '');
-
-      // ----- HTS / tariff enrichment from Grass DB -----
-      const db = getDbInfoForPart(item.part_number || '');
-      let tariffNum = '';
-      let tariffDesc = '';
-      let tariffUom  = '';
-      let supMid     = '';
-      let hasThirdTariff = false;
-
-      if(db && grassDbCols.tariffKey){
-        tariffNum = db[grassDbCols.tariffKey] || '';
-      }
-      if(db && grassDbCols.descKey){
-        tariffDesc = db[grassDbCols.descKey] || '';
-      }
-      if(db && grassDbCols.uomKey){
-        tariffUom = db[grassDbCols.uomKey] || '';
-      }
-      if(db && grassDbCols.supplierMidKey){
-        supMid = db[grassDbCols.supplierMidKey] || '';
-      }
-      if(db && grassDbCols.thirdTariffKey){
-        hasThirdTariff = !!db[grassDbCols.thirdTariffKey];
-      }
-
-      // Decide Quantity1 / UnitOfMeasure1 (primary tariff)
-      let q1 = item.quantity || '';
-      let u1 = item.unit || '';
-      const netW = roundWeight(item.net_weight);
-      if(tariffUom && /KG/i.test(String(tariffUom)) && netW){
-        q1 = netW;
-        u1 = 'KG';
-      }
+      const effectiveItemTotal = (itemTotalOverride != null ? itemTotalOverride : item.line_total);
 
       const row = {
         'InvoiceNumber': item.invoice_number || '',
         'InvoiceDate': item.invoice_date || '',
         'InvoiceTotal': item.invoice_total || '',
-        'SupplierMID': supMid || '',
+        'SupplierMID': lookupSupplierMIDFromText(supplierForInvoice),
         'SupplierName': supplierForInvoice,
         'BuyerPartNumber': buyerPartNum,
         'SupplierPartNumber': supplierPartNum,
         'Quantity': item.quantity || '',
         'UnitOfMeasure': item.unit || '',
         'Description': '',
-        'UnitPrice': item.unit_price || '',
-        'ItemTotal': item.line_total || '',
+        'UnitPrice': '',
+        'ItemTotal': effectiveItemTotal || '',
         'CurrencyCode': 'USD',
         'ExchangeRate': '',
         'CountryOfOrigin': item.country_of_origin || '',
@@ -1014,11 +1201,11 @@
         'PO_Date': '',
         'GrossWeight': '',
         'GrossWeightUnit': '',
-        'NetWeight': netW,
-        'TariffNumber': tariffNum,
-        'TariffDescription': tariffDesc,
-        'Quantity1': q1,
-        'UnitOfMeasure1': u1,
+        'NetWeight': roundWeight(item.net_weight),
+        'TariffNumber': '',
+        'TariffDescription': '',
+        'Quantity1': '',
+        'UnitOfMeasure1': '',
         'Quantity2': '',
         'UnitOfMeasure2': '',
         'Quantity3': '',
@@ -1067,24 +1254,189 @@
         '4TariffQuantity2': '',
         '4TariffUnitofMeasure2': '',
         '4TariffQuantity3': '',
-        '4TariffUnitofMeasure3': ''
+        '4TariffUnitofMeasure3': '',
+        '4 Value': '',
+        '5TariffNumber': '',
+        '5TariffDescription': '',
+        '5TariffQuantity1': '',
+        '5TariffUnitofMeasure1': '',
+        '5TariffQuantity2': '',
+        '5TariffUnitofMeasure2': '',
+        '5TariffQuantity3': '',
+        '5TariffUnitofMeasure3': '',
+        '5 Value': ''
       };
 
-      // --- Special behavior: Steel Excl with third tariff => net weight in ThirdTariffQuantity1 ---
-      if(isSteelExcl && hasThirdTariff && netW){
-        row['ThirdTariffQuantity1'] = netW;
-        row['ThirdTariffUnitofMeasure1'] = 'KG';
+      row['UnitPrice'] = computeExportUnitPrice({quantity:item.quantity, line_total:effectiveItemTotal});
+      return row;
+    }
+
+    function fillTariffsForBaseRow(row, partNumber, netWeightStr){
+      const tariffs = lookupTariffsByPart(partNumber);
+      const tariffFields = ['TariffNumber', 'SecondaryTariffNumber', 'ThirdTariffNumber', '4TariffNumber', '5TariffNumber'];
+      const netRounded = roundWeight(netWeightStr);
+
+      tariffs.forEach((tariff, idx) => {
+        if(idx < tariffFields.length){
+          row[tariffFields[idx]] = tariff;
+          const startsWithExempt = String(tariff).startsWith('98') || String(tariff).startsWith('99');
+          if(!startsWithExempt){
+            const uomInfo = lookupHtsUom(tariff);
+            if(idx === 0){
+              row['Quantity1'] = netRounded;
+              row['UnitOfMeasure1'] = uomInfo.uom1;
+              if(uomInfo.uom2){
+                row['Quantity2'] = netRounded;
+                row['UnitOfMeasure2'] = uomInfo.uom2;
+              }
+            } else if(idx === 1){
+              row['Secondary Quantity1'] = netRounded;
+              row['Secondaryunitofmeasure1'] = uomInfo.uom1;
+              if(uomInfo.uom2){
+                row['secondaryquantity2'] = netRounded;
+                row['secondaryunitofmeasure2'] = uomInfo.uom2;
+              }
+            } else if(idx === 2){
+              row['ThirdTariffQuantity1'] = netRounded;
+              row['ThirdTariffUnitofMeasure1'] = uomInfo.uom1;
+              if(uomInfo.uom2){
+                row['ThirdTariffQuantity2'] = netRounded;
+                row['ThirdTariffUnitofMeasure2'] = uomInfo.uom2;
+              }
+            } else if(idx === 3){
+              row['4TariffQuantity1'] = netRounded;
+              row['4TariffUnitofMeasure1'] = uomInfo.uom1;
+              if(uomInfo.uom2){
+                row['4TariffQuantity2'] = netRounded;
+                row['4TariffUnitofMeasure2'] = uomInfo.uom2;
+              }
+            } else if(idx === 4){
+              row['5TariffQuantity1'] = netRounded;
+              row['5TariffUnitofMeasure1'] = uomInfo.uom1;
+              if(uomInfo.uom2){
+                row['5TariffQuantity2'] = netRounded;
+                row['5TariffUnitofMeasure2'] = uomInfo.uom2;
+              }
+            }
+          }
+        }
+      });
+
+      // Special handling for STEEL EXCL parts with third tariff
+      const partUpper = String(partNumber).toUpperCase();
+      if(partUpper.startsWith('STEEL EXCL') && tariffs.length > 2 && tariffs[2]){
+        row['ThirdTariffQuantity1'] = netRounded;
       }
 
-      // --- Special behavior: ALL STEEL parts ---
-      // For ALL STEEL, primary TariffNumber must be blank,
-      // and Secondaryunitofmeasure1 must remain blank.
-      if(isAllSteel){
+      // Special handling for ALL STEEL parts
+      if(partUpper.startsWith('ALL STEEL')){
         row['TariffNumber'] = '';
         row['Secondaryunitofmeasure1'] = '';
       }
+    }
 
+    function buildSteelOrAlumRow(item, type){
+      const isSteel = (type === 'Steel');
+      const parentPos = String(item.position||'').replace(/[SA]$/,'');
+      const parentItem = items.find(it =>
+        it.invoice_number === item.invoice_number &&
+        String(it.position||'') === parentPos
+      );
+
+      let tariffForSubline = null;
+      if(parentItem){
+        const parentTariffs = lookupTariffsByPart(parentItem.part_number);
+        tariffForSubline = parentTariffs.find(t => !String(t).startsWith('98') && !String(t).startsWith('99')) || null;
+      }
+      const subNum = tariffForSubline
+        ? getSteelAlumPartNumber(tariffForSubline, isSteel ? 'Steel' : 'Aluminum')
+        : (isSteel ? 'STEEL GENERIC' : 'ALUM GENERIC');
+
+      const buyerPartNum = subNum;
+      const supplierPartNum = subNum;
+      const row = buildBaseRowSkeleton(item, buyerPartNum, supplierPartNum, item.line_total);
+
+      const qtyRounded = roundWeight(item.quantity);
+      if(isSteel){
+        row['TariffNumber'] = '99030133';
+        row['SecondaryTariffNumber'] = '99038191';
+      }else{
+        row['TariffNumber'] = '99030133';
+        row['SecondaryTariffNumber'] = '99038508';
+      }
+      row['Secondary Quantity1'] = qtyRounded;
+      row['Secondaryunitofmeasure1'] = 'KG';
+      row['NetWeight'] = qtyRounded;
+      return row;
+    }
+
+    function processSingleItem(item){
+      const pos = String(item.position||'');
+      const isSteelLine = pos.endsWith('S');
+      const isAlumLine  = pos.endsWith('A');
+
+      if(isSteelLine){
+        exportRows.push(buildSteelOrAlumRow(item,'Steel'));
+        return;
+      }
+      if(isAlumLine){
+        exportRows.push(buildSteelOrAlumRow(item,'Aluminum'));
+        return;
+      }
+
+      // Regular base line
+      const part = item.part_number || '';
+      const buyerPartNum = part;
+      const supplierPartNum = part;
+      const row = buildBaseRowSkeleton(item, buyerPartNum, supplierPartNum, item.line_total);
+      fillTariffsForBaseRow(row, part, item.net_weight);
       exportRows.push(row);
+    }
+
+    function processGroup(g){
+      if(!g.base){
+        g.steels.forEach(it=> processSingleItem(it));
+        g.alums.forEach(it=> processSingleItem(it));
+        g.others.forEach(it=> processSingleItem(it));
+        return;
+      }
+      const base = g.base;
+      const orig = parseNum(base._origLineTotal || base.line_total);
+      let steelTotal = 0;
+      g.steels.forEach(s=>{
+        const v = parseNum(s.line_total);
+        if(isFinite(v)) steelTotal += v;
+      });
+
+      const is100Steel =
+        isFinite(orig) && orig>0 &&
+        isFinite(steelTotal) && steelTotal>0 &&
+        Math.abs(steelTotal - orig) <= orig * 0.01;
+
+      if(is100Steel){
+        // 100% steel: single ALL STEEL line using original values
+        const mainTariff = getMainTariffByPart(base.part_number);
+        const allSteelPart = getAllSteelPartForTariff(mainTariff);
+        const buyerPartNum = allSteelPart;
+        const supplierPartNum = allSteelPart;
+        const row = buildBaseRowSkeleton(base, buyerPartNum, supplierPartNum, fmt2(orig));
+        fillTariffsForBaseRow(row, allSteelPart, base.net_weight);
+        exportRows.push(row);
+      }else{
+        // Partial steel: base + each steel subline + any alums/others
+        processSingleItem(base);
+        g.steels.forEach(it=> exportRows.push(buildSteelOrAlumRow(it,'Steel')));
+        g.alums.forEach(it=> exportRows.push(buildSteelOrAlumRow(it,'Aluminum')));
+        g.others.forEach(it=> processSingleItem(it));
+      }
+    }
+
+    orderedEntries.forEach(entry=>{
+      if(entry.type === 'single'){
+        processSingleItem(entry.item);
+      }else{
+        processGroup(entry);
+      }
     });
 
     const headers = [
@@ -1105,7 +1457,10 @@
       'ThirdTariffUnitofMeasure2','ThirdTariffQuantity3','ThirdTariffUnitofMeasure3',
       'Third Value','4TariffNumber','4TariffDescription','4TariffQuantity1',
       '4TariffUnitofMeasure1','4TariffQuantity2','4TariffUnitofMeasure2',
-      '4TariffQuantity3','4TariffUnitofMeasure3'
+      '4TariffQuantity3','4TariffUnitofMeasure3','4 Value',
+      '5TariffNumber','5TariffDescription','5TariffQuantity1',
+      '5TariffUnitofMeasure1','5TariffQuantity2','5TariffUnitofMeasure2',
+      '5TariffQuantity3','5TariffUnitofMeasure3','5 Value'
     ];
 
     const aoa = [headers];
