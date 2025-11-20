@@ -1328,13 +1328,16 @@
       // ALL STEEL base parts:
       // - keep UOM behavior
       // - if 3rd tariff exists, ThirdTariffQuantity1 = NetWeight
-      // - ONLY TariffNumber and ThirdTariffUnitofMeasure1 are blanked
+      // - TariffNumber blank
+      // - ThirdTariffUnitofMeasure1 blank
+      // - NEW: Secondary Quantity1 = NetWeight
       if(partUpper.startsWith('ALL STEEL')){
         if(tariffs.length > 2 && tariffs[2]){
           row['ThirdTariffQuantity1'] = netRounded;
         }
         row['TariffNumber'] = '';
-        row['ThirdTariffUnitofMeasure1'] = ''; // your new requirement
+        row['ThirdTariffUnitofMeasure1'] = '';
+        row['Secondary Quantity1'] = netRounded;  // <-- NEW
       }
     }
 
