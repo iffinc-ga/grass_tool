@@ -378,7 +378,7 @@
     }
   }
 
-  // ===== Core Grass parsing (unchanged logic) =====
+  // ===== Core Grass parsing (unchanged logic except requested steel net_weight tweak) =====
   function parseGrass(text){
     ALL.length = 0;
     ORDER.length = 0;
@@ -579,6 +579,12 @@
           if(isFinite(sKG)) sKG = sKG * ratio;
         }
 
+        // NEW: compute steel content line net_weight as baseNetkg - steelKG (if both known)
+        let steelLineNet = NaN;
+        if (isFinite(baseNetkg) && isFinite(sKG)) {
+          steelLineNet = baseNetkg - sKG;
+        }
+
         ALL.push({
           invoice_number: invNum,
           invoice_date:  invDate,
@@ -590,7 +596,7 @@
           unit:'KG',
           unit_price:'',
           line_total: fmt2(sVal),
-          net_weight:'',
+          net_weight: isFinite(steelLineNet) ? fmt2(steelLineNet) : '',
           country_of_origin: coo,
           origin: 'auto_steel'
         });
@@ -1078,11 +1084,15 @@
   }
 
   function getSteelAlumPartNumber(tariff, type){
-    if(!steelAlumDb || !steelAlumDb.length) return type === 'Steel' ? 'STEEL GENERIC' : 'ALUM GENERIC';
+    if(!steelAlumDb || !steelAlumDb.length)
+      return type === 'Steel' ? 'STEEL EXCL GENERIC' : 'ALUM GENERIC'; // UPDATED fallback
+
     const norm = normalizeTariffValue(tariff);
     const mapping = steelAlumDb.find(row => normalizeTariffValue(row['Tariff']) === norm);
     if(mapping) return type === 'Steel' ? mapping['Steel'] : mapping['Aluminum'];
-    return type === 'Steel' ? 'STEEL GENERIC' : 'ALUM GENERIC';
+
+    // UPDATED steel fallback name
+    return type === 'Steel' ? 'STEEL EXCL GENERIC' : 'ALUM GENERIC';
   }
 
   function computeExportUnitPrice(item){
@@ -1337,7 +1347,7 @@
         }
         row['TariffNumber'] = '';
         row['ThirdTariffUnitofMeasure1'] = '';
-        row['Secondary Quantity1'] = netRounded;  // <-- NEW
+        row['Secondary Quantity1'] = netRounded;
       }
     }
 
@@ -1357,7 +1367,7 @@
 
       const subNum = tariffForSubline
         ? getSteelAlumPartNumber(tariffForSubline, isSteel ? 'Steel' : 'Aluminum')
-        : (isSteel ? 'STEEL GENERIC' : 'ALUM GENERIC');
+        : (isSteel ? 'STEEL EXCL GENERIC' : 'ALUM GENERIC'); // fallback string
 
       const buyerPartNum = subNum;
       const supplierPartNum = subNum;
