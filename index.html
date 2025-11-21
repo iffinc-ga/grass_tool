@@ -65,7 +65,7 @@
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Grass Invoice PDF Parser</h1>
+      <h1>Grass Invoice PDF Parser v3.0</h1>
       <p>Only steel sublines are kept. Base line total = original invoice total − sum of steel sublines.</p>
     </div>
 
@@ -378,7 +378,7 @@
     }
   }
 
-  // ===== Core Grass parsing (unchanged logic except requested steel net_weight tweak) =====
+  // ===== Core Grass parsing (unchanged logic) =====
   function parseGrass(text){
     ALL.length = 0;
     ORDER.length = 0;
@@ -565,6 +565,7 @@
         line_total: origLineTotal,
         _origLineTotal: origLineTotal,
         net_weight: netkgStr,
+        _origNetWeight: netkgStr,
         country_of_origin: coo
       });
 
@@ -579,12 +580,6 @@
           if(isFinite(sKG)) sKG = sKG * ratio;
         }
 
-        // NEW: compute steel content line net_weight as baseNetkg - steelKG (if both known)
-        let steelLineNet = NaN;
-        if (isFinite(baseNetkg) && isFinite(sKG)) {
-          steelLineNet = baseNetkg - sKG;
-        }
-
         ALL.push({
           invoice_number: invNum,
           invoice_date:  invDate,
@@ -596,7 +591,7 @@
           unit:'KG',
           unit_price:'',
           line_total: fmt2(sVal),
-          net_weight: isFinite(steelLineNet) ? fmt2(steelLineNet) : '',
+          net_weight:'',
           country_of_origin: coo,
           origin: 'auto_steel'
         });
@@ -903,6 +898,18 @@
       });
       const newTotal = Math.max(0, orig - steelSum);
       base.line_total = fmt2(newTotal);
+
+      // Also adjust net weight by subtracting steel content weights
+      const origWeight = parseNum(base._origNetWeight || base.net_weight);
+      if(isFinite(origWeight)){
+        let steelWeightSum = 0;
+        group.steels.forEach(s=>{
+          const wt = parseNum(s.quantity); // Steel lines use quantity field for weight in kg
+          if(isFinite(wt)) steelWeightSum += wt;
+        });
+        const newWeight = Math.max(0, origWeight - steelWeightSum);
+        base.net_weight = fmt2(newWeight);
+      }
     });
   }
 
@@ -1084,15 +1091,11 @@
   }
 
   function getSteelAlumPartNumber(tariff, type){
-    if(!steelAlumDb || !steelAlumDb.length)
-      return type === 'Steel' ? 'STEEL EXCL GENERIC' : 'ALUM GENERIC'; // UPDATED fallback
-
+    if(!steelAlumDb || !steelAlumDb.length) return type === 'Steel' ? 'STEEL GENERIC' : 'ALUM GENERIC';
     const norm = normalizeTariffValue(tariff);
     const mapping = steelAlumDb.find(row => normalizeTariffValue(row['Tariff']) === norm);
     if(mapping) return type === 'Steel' ? mapping['Steel'] : mapping['Aluminum'];
-
-    // UPDATED steel fallback name
-    return type === 'Steel' ? 'STEEL EXCL GENERIC' : 'ALUM GENERIC';
+    return type === 'Steel' ? 'STEEL GENERIC' : 'ALUM GENERIC';
   }
 
   function computeExportUnitPrice(item){
@@ -1347,7 +1350,7 @@
         }
         row['TariffNumber'] = '';
         row['ThirdTariffUnitofMeasure1'] = '';
-        row['Secondary Quantity1'] = netRounded;
+        row['Secondary Quantity1'] = netRounded;  // <-- NEW
       }
     }
 
@@ -1367,7 +1370,7 @@
 
       const subNum = tariffForSubline
         ? getSteelAlumPartNumber(tariffForSubline, isSteel ? 'Steel' : 'Aluminum')
-        : (isSteel ? 'STEEL EXCL GENERIC' : 'ALUM GENERIC'); // fallback string
+        : (isSteel ? 'STEEL EXCL GENERIC' : 'ALUM GENERIC');
 
       const buyerPartNum = subNum;
       const supplierPartNum = subNum;
@@ -1450,7 +1453,19 @@
         fillTariffsForBaseRow(row, allSteelPart, base.net_weight);
         exportRows.push(row);
       }else{
-        processSingleItem(base);
+        // Adjust base net weight by subtracting steel content weights
+        const baseClone = {...base};
+        const origWeight = parseNum(base._origNetWeight || base.net_weight);
+        if(isFinite(origWeight)){
+          let steelWeightSum = 0;
+          g.steels.forEach(s=>{
+            const wt = parseNum(s.quantity); // Steel lines use quantity field for weight in kg
+            if(isFinite(wt)) steelWeightSum += wt;
+          });
+          const newWeight = Math.max(0, origWeight - steelWeightSum);
+          baseClone.net_weight = fmt2(newWeight);
+        }
+        processSingleItem(baseClone);
         g.steels.forEach(it=> exportRows.push(buildSteelOrAlumRow(it,'Steel')));
         g.alums.forEach(it=> exportRows.push(buildSteelOrAlumRow(it,'Aluminum')));
         g.others.forEach(it=> processSingleItem(it));
