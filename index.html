@@ -439,10 +439,14 @@
     const steelInfo = items.map(()=>({ steelKG:NaN, steelVal:NaN }));
     const usedBlockIdx = new Set();
 
-    const blockRegex =
+    // Try both formats: "Value in steel" (newer) and "Steel value" (older)
+    const blockRegex1 =
+      /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)\s*Net\s*weight\s*in\s*kg\s*in\s*other\s*:\s*([\d.,]+)\s*Value\s*in\s*steel\s*:\s*([\d.,]+)\s*Value\s*in\s*other\s*:\s*([\d.,]+)/gi;
+    const blockRegex2 =
       /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)\s*Net\s*weight\s*in\s*kg\s*in\s*other\s*:\s*([\d.,]+)\s*Steel\s*value\s*:\s*([\d.,]+)\s*Other\s*value\s*:\s*([\d.,]+)/gi;
-    let mb;
-    while((mb = blockRegex.exec(big)) !== null){
+    
+    // Function to process matches from either regex format
+    function processBlockMatch(mb){
       const blockIdx = mb.index;
       const steelKG = parseNum(mb[1]);
       const otherKG = parseNum(mb[2]);
@@ -451,7 +455,7 @@
 
       const blockNet = (isFinite(steelKG)?steelKG:0) + (isFinite(otherKG)?otherKG:0);
       const blockVal = (isFinite(steelVal)?steelVal:0) + (isFinite(otherVal)?otherVal:0);
-      if(!isFinite(blockNet) || !isFinite(blockVal)) continue;
+      if(!isFinite(blockNet) || !isFinite(blockVal)) return;
 
       let bestIdx = -1;
       let bestScore = Infinity;
@@ -487,16 +491,28 @@
       }
     }
 
-    const steelOnlyRegex =
+    // Process both regex formats
+    let mb;
+    while((mb = blockRegex1.exec(big)) !== null){
+      processBlockMatch(mb);
+    }
+    while((mb = blockRegex2.exec(big)) !== null){
+      processBlockMatch(mb);
+    }
+
+    const steelOnlyRegex1 =
+      /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)[\s\S]{0,120}?Value\s*in\s*steel\s*:\s*([\d.,]+)/gi;
+    const steelOnlyRegex2 =
       /Net\s*weight\s*in\s*kg\s*in\s*steel\s*:\s*([\d.,]+)[\s\S]{0,120}?Steel\s*value\s*:\s*([\d.,]+)/gi;
-    let so;
-    while((so = steelOnlyRegex.exec(big)) !== null){
+    
+    // Function to process steel-only matches
+    function processSteelOnlyMatch(so){
       const idx = so.index;
-      if(usedBlockIdx.has(idx)) continue;
+      if(usedBlockIdx.has(idx)) return;
 
       const steelKG = parseNum(so[1]);
       const steelVal = parseNum(so[2]);
-      if(!isFinite(steelKG) && !isFinite(steelVal)) continue;
+      if(!isFinite(steelKG) && !isFinite(steelVal)) return;
 
       let bestIdx = -1;
       let bestRel = Infinity;
@@ -527,6 +543,15 @@
           info.steelVal = isFinite(info.steelVal) ? (info.steelVal + steelVal) : steelVal;
         }
       }
+    }
+
+    // Process both steel-only regex formats
+    let so;
+    while((so = steelOnlyRegex1.exec(big)) !== null){
+      processSteelOnlyMatch(so);
+    }
+    while((so = steelOnlyRegex2.exec(big)) !== null){
+      processSteelOnlyMatch(so);
     }
 
     if(!items.length){
